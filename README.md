@@ -1,5 +1,8 @@
 # FlowGuard AI 사용자 중심 최종 기획안
 
+> 이 문서를 기준으로 한 실행 가능한 MVP는 `apps/api`와 `apps/web`에 있습니다.
+> 로컬 실행, 검증 방법과 명세의 `TBD` 결정 사항은 [DEVELOPMENT.md](DEVELOPMENT.md)를 참고하세요.
+
 ## 1. 서비스 개요
 
 ### 서비스명  
