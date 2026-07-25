@@ -1,0 +1,317 @@
+export type RiskStatus = "STABLE" | "VERIFY" | "PREPARE" | "ACT_NOW";
+
+export interface BindingConstraint {
+  date?: string | null;
+  event_id?: string | null;
+  reason?: string | null;
+}
+
+export interface SafeToSpend {
+  safe_to_spend: number;
+  protection_level?: number;
+  binding_constraint?: BindingConstraint | null;
+  data_confidence?: number;
+}
+
+export interface RiskMetrics {
+  shortfall_probability?: number;
+  payment_account_shortfall_probability?: number;
+  total_liquidity_shortfall_probability?: number;
+  first_risk_date?: string | null;
+  shortfall_type?: "PAYMENT_ACCOUNT" | "TOTAL_LIQUIDITY" | null;
+  expected_gap_min?: number;
+  expected_gap_max?: number;
+  days_until_risk?: number | null;
+  data_confidence?: number;
+}
+
+export interface RiskPresentation {
+  status?: RiskStatus;
+  status_label?: string;
+  title?: string;
+  impact?: string;
+  cause?: string;
+  recommended_action?: string;
+  confidence_label?: string;
+}
+
+export interface DataQuality {
+  missing_sources?: string[];
+  stale_sources?: string[];
+  unconfirmed_items?: unknown[];
+}
+
+export interface ActionDefinition {
+  action_id?: string;
+  type?: string;
+  parameters?: Record<string, unknown>;
+  requires_user_approval?: boolean;
+  assumptions?: string[];
+}
+
+export interface RiskShift {
+  detected?: boolean;
+  source_date?: string | null;
+  target_date?: string | null;
+  message?: string;
+  reasons?: string[];
+}
+
+export interface EvaluationState {
+  status?: RiskStatus;
+  status_label?: string;
+  safe_to_spend?: number;
+  risk_metrics?: RiskMetrics;
+}
+
+export interface Recommendation {
+  recommendation_id?: string;
+  id?: string;
+  title?: string;
+  summary?: string;
+  rationale?: string;
+  reason?: string;
+  status?: string;
+  rank?: number;
+  action?: ActionDefinition;
+  actions?: ActionDefinition[];
+  before?: EvaluationState;
+  after?: EvaluationState;
+  evaluation?: {
+    valid?: boolean;
+    before?: EvaluationState;
+    after?: EvaluationState;
+    risk_shift?: RiskShift;
+    policy_violations?: PolicyViolation[];
+  };
+  risk_shift?: RiskShift;
+  policy_violations?: PolicyViolation[];
+  policy_result?: {
+    valid?: boolean;
+    violations?: PolicyViolation[];
+    requires_user_approval?: boolean;
+    policy_version?: string;
+  };
+  requires_user_approval?: boolean;
+}
+
+export interface PolicyViolation {
+  code?: string;
+  message?: string;
+  action_id?: string;
+}
+
+export interface DashboardResponse {
+  analysis_run_id?: string;
+  snapshot_id?: string;
+  as_of?: string;
+  analysis_status?: string;
+  is_virtual?: boolean;
+  safe_to_spend?: SafeToSpend | number | null;
+  risk_metrics?: RiskMetrics;
+  presentation?: RiskPresentation;
+  recommendation?: Recommendation | null;
+  data_quality?: DataQuality;
+  last_successful_analysis_at?: string | null;
+}
+
+export interface DailyPosition {
+  date: string;
+  account_balances?: Record<string, number>;
+  total_balance?: number;
+  available_balance?: number;
+  protected_balance?: number;
+  triggering_event_ids?: string[];
+  status?: RiskStatus;
+}
+
+export interface WeeklyPosition {
+  week?: number;
+  start_date?: string;
+  end_date?: string;
+  min_available_balance?: number;
+  status?: RiskStatus;
+  causes?: string[];
+}
+
+export interface Scenario {
+  id?: string;
+  name?: string;
+  label?: string;
+  scenario?: string;
+  scenario_label?: string;
+  status?: RiskStatus;
+}
+
+export interface TimelineResponse {
+  as_of?: string;
+  horizon_days?: number;
+  daily_positions?: DailyPosition[];
+  weekly_positions?: WeeklyPosition[];
+  scenarios?: Array<Scenario | string>;
+}
+
+export interface NextRiskResponse {
+  as_of?: string;
+  risk_metrics?: RiskMetrics;
+  presentation?: RiskPresentation;
+  triggering_events?: Array<Record<string, unknown>>;
+  causes?: string[];
+  data_confidence?: number;
+}
+
+export interface Receivable {
+  receivable_id?: string;
+  event_id?: string;
+  counterparty_id?: string;
+  counterparty_name?: string;
+  amount?: number;
+  expected_date?: string;
+  status?: "CONFIRMED" | "ESTIMATED" | "OVERDUE" | "RECEIVED" | "CANCELLED";
+  destination_account_id?: string;
+  user_confirmed?: boolean;
+  source?: string;
+  updated_at?: string;
+  average_delay_days?: number;
+  payment_history_count?: number;
+  recent_trend?: string;
+  data_confidence?: number;
+  counterparty?: {
+    counterparty_id?: string;
+    name?: string;
+  };
+  evidence?: {
+    average_delay_days?: number;
+    payment_history_count?: number;
+    recent_trend?: string;
+    data_confidence?: number;
+  };
+  counterparty_evidence?: {
+    average_delay_days?: number;
+    payment_history_count?: number;
+    recent_trend?: string;
+    data_confidence?: number;
+  };
+}
+
+export interface Account {
+  account_id?: string;
+  name?: string;
+  account_name?: string;
+  account_type?: string;
+  current_balance?: number;
+  available_balance?: number;
+}
+
+export interface Card {
+  card_id?: string;
+  name?: string;
+  payment_account_id?: string;
+  payment_day?: number;
+  current_billing_amount?: number;
+  billing_date?: string;
+  updated_at?: string;
+}
+
+export interface Counterparty {
+  counterparty_id?: string;
+  name?: string;
+  counterparty_type?: string;
+  is_recurring?: boolean;
+  payment_history_count?: number;
+}
+
+export interface InstallmentPlan {
+  installment_plan_id?: string;
+  card_id?: string;
+  card_name?: string;
+  merchant_name?: string;
+  description?: string;
+  original_amount?: number;
+  monthly_payment?: number;
+  total_months?: number;
+  remaining_months?: number;
+  next_payment_date?: string;
+  status?: string;
+}
+
+export interface ImportCandidate {
+  candidate_id?: string;
+  id?: string;
+  transaction_id?: string;
+  type?: string;
+  candidate_type?: string;
+  description?: string;
+  counterparty_name?: string;
+  amount?: number;
+  confidence?: number;
+  suggested_category?: string;
+  occurrences?: number;
+  evidence_transaction_ids?: string[];
+  proposed_record?: {
+    amount?: number;
+    original_amount?: number;
+    total_months?: number;
+    card_id?: string;
+    next_payment_date?: string;
+    counterparty_id?: string;
+    counterparty_name?: string;
+    destination_account_id?: string;
+    account_id?: string;
+    expected_date?: string;
+    event_type?: string;
+    is_essential?: boolean;
+    description?: string;
+    source_transaction_id?: string;
+    [key: string]: unknown;
+  };
+}
+
+export interface ImportResponse {
+  import_id?: string;
+  imported_count?: number;
+  imported_counts?: Record<string, number>;
+  duplicate_count?: number;
+  candidates?: ImportCandidate[];
+  detected_candidates?: ImportCandidate[];
+  recurring_income_candidates?: ImportCandidate[];
+  fixed_expense_candidates?: ImportCandidate[];
+  installment_candidates?: ImportCandidate[];
+  message?: string;
+}
+
+export interface AnalysisResponse {
+  analysis_id?: string;
+  analysis_run_id?: string;
+  status?: string;
+  analysis_status?: string;
+  before?: EvaluationState;
+  after?: EvaluationState;
+  risk_shift?: RiskShift;
+  presentation?: RiskPresentation;
+  recommendation?: Recommendation;
+}
+
+export interface ActionEvaluation {
+  valid?: boolean;
+  before?: EvaluationState;
+  after?: EvaluationState;
+  risk_shift?: RiskShift;
+  policy_violations?: PolicyViolation[];
+  requires_user_approval?: boolean;
+  tool_version?: string;
+}
+
+export interface InstallmentPrecheckResponse {
+  snapshot_id?: string;
+  action?: ActionDefinition;
+  evaluation?: ActionEvaluation;
+  policy?: {
+    valid?: boolean;
+    violations?: PolicyViolation[];
+    requires_user_approval?: boolean;
+    policy_version?: string;
+  };
+  virtual_only?: boolean;
+  external_actions_executed?: boolean;
+}
