@@ -103,7 +103,8 @@ def test_wide_import_reports_counts_and_timestamp_quality_notice(
     payload = response.json()
     assert payload["imported_count"] == 1
     assert payload["imported_counts"]["accounts"] == 1
-    assert payload["analysis"]["status"] == "COMPLETED"
+    assert payload["revision"]
+    assert payload["analysis_required"] is True
     assert any(notice["code"] == "MISSING_UPDATED_AT" for notice in payload["data_quality_notices"])
 
 

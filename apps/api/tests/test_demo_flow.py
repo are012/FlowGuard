@@ -32,7 +32,8 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         assert imported.status_code == 201
         import_payload = imported.json()
         assert import_payload["format"] == "WIDE_RECORDS"
-        assert import_payload["analysis"]["status"] == "COMPLETED"
+        assert import_payload["revision"]
+        assert import_payload["analysis_required"] is True
         assert import_payload["imported_counts"] == {
             "accounts": 3,
             "cards": 2,
@@ -45,6 +46,22 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
             "protected_funds": 1,
             "candidates": 5,
         }
+
+        analysis = client.post(
+            "/api/v1/analyses",
+            headers=headers,
+            json={"trigger_type": "DATA_REFRESH"},
+        )
+        assert analysis.status_code == 201
+        assert analysis.json()["status"] == "COMPLETED"
+
+        analysis = client.post(
+            "/api/v1/analyses",
+            headers=headers,
+            json={"trigger_type": "DATA_REFRESH"},
+        )
+        assert analysis.status_code == 201
+        assert analysis.json()["status"] == "COMPLETED"
 
         dashboard = client.get("/api/v1/dashboard", headers=headers)
         assert dashboard.status_code == 200
@@ -124,7 +141,8 @@ def test_every_sample_candidate_can_be_confirmed_and_reanalyzed() -> None:
             assert response.status_code == 200
             payload = response.json()
             assert payload["status"] == "CONFIRMED"
-            assert payload["analysis"]["status"] == "COMPLETED"
+            assert payload["revision"]
+            assert payload["analysis_required"] is True
             confirmed_types.append(candidate["candidate_type"])
 
         assert confirmed_types.count("RECURRING_INCOME") == 2

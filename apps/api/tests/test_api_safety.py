@@ -36,8 +36,8 @@ def _post_account(
         },
     )
     assert response.status_code == 201
-    assert response.json()["analysis"]["trigger_type"] == "DATA_REFRESH"
-    assert response.json()["analysis"]["status"] == "COMPLETED"
+    assert response.json()["revision"]
+    assert response.json()["analysis_required"] is True
 
 
 def _payment_risk(client: TestClient, *, second_source: bool = False) -> dict:
@@ -59,6 +59,15 @@ def _payment_risk(client: TestClient, *, second_source: bool = False) -> dict:
         },
     )
     assert event.status_code == 201
+    analysis = client.post(
+        "/api/v1/analyses",
+        json={
+            "trigger_type": "DATA_REFRESH",
+            "as_of": "2026-07-24T09:00:00+09:00",
+        },
+    )
+    assert analysis.status_code == 201
+    assert analysis.json()["status"] == "COMPLETED"
     recommendations = client.get("/api/v1/recommendations").json()
     assert len(recommendations) == 1
     return recommendations[0]
@@ -255,7 +264,8 @@ def test_candidate_yes_promotes_fixed_expense_with_atomic_counterparty() -> None
 
         assert response.status_code == 200
         payload = response.json()
-        assert payload["analysis"]["status"] == "COMPLETED"
+        assert payload["revision"]
+        assert payload["analysis_required"] is True
         promoted = payload["promotion"]["record"]
         counterparty_id = promoted["counterparty_id"]
         assert counterparty_id is not None
@@ -323,7 +333,8 @@ def test_candidate_yes_promotes_installment_when_payment_date_is_confirmed() -> 
 
         assert response.status_code == 200
         payload = response.json()
-        assert payload["analysis"]["status"] == "COMPLETED"
+        assert payload["revision"]
+        assert payload["analysis_required"] is True
         assert payload["promotion"]["kind"] == "installment_plans"
         assert payload["promotion"]["record"]["monthly_payment"] == 100_000
 

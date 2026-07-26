@@ -90,7 +90,8 @@ async def import_transactions(
     }
     if preference_changes:
         imported["preferences"] = data.update_preferences(user_id, preference_changes)
-    imported["analysis"] = analyses.run(user_id, trigger_type="DATA_REFRESH")
+    imported["revision"] = analyses.repository.current_state_revision(user_id)
+    imported["analysis_required"] = True
     return imported
 
 
@@ -459,5 +460,6 @@ def _mutation_result(
 ) -> dict[str, Any]:
     return {
         **record,
-        "analysis": analyses.run(user_id, trigger_type="DATA_REFRESH"),
+        "revision": analyses.repository.current_state_revision(user_id),
+        "analysis_required": True,
     }
