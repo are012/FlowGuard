@@ -937,9 +937,21 @@ Liquidity Investigator Agent는 다음을 수행한다.
   "evaluated_plans": [],
   "recommended_plan": null,
   "policy_result": null,
+  "decision_trace": {
+    "mode": "LUNA",
+    "model": "gpt-5.6-luna",
+    "fallback_reason": null,
+    "steps": [],
+    "usage": null
+  },
   "analysis_complete": false
 }
 ```
+
+`decision_trace.steps`는 위험 가설, 실제 도구 호출, 후보 평가, 최종 선택처럼
+저장된 실행 산출물만 포함한다. 모델의 숨은 사고과정이나 원문 추론 토큰은 저장하거나
+사용자에게 노출하지 않는다. 모델을 실행하지 못한 경우 `mode`와
+`fallback_reason`으로 결정론적 폴백을 명시한다.
 
 ---
 

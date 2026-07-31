@@ -34,6 +34,24 @@ function safeToSpendDetails(value?: SafeToSpend | number | null) {
   return typeof value === "object" && value ? value : undefined;
 }
 
+function agentModeLabel(mode?: string) {
+  if (mode === "LUNA") return "GPT-5.6 Luna";
+  if (mode === "LUNA_NOT_REQUIRED") return "Luna · 대응 불필요";
+  if (mode === "DETERMINISTIC_FALLBACK") return "결정론적 폴백";
+  return "결정론적 조사";
+}
+
+function traceKindLabel(kind: string) {
+  return (
+    {
+      RISK_HYPOTHESIS: "위험 확인",
+      TOOL_CALL: "근거 조회",
+      CANDIDATE_EVALUATION: "대응안 검증",
+      FINAL_SELECTION: "최종 선택",
+    }[kind] || "판단 단계"
+  );
+}
+
 export default function DashboardPage() {
   const { data, error, loading, reload } =
     useRemote<DashboardResponse>("/api/v1/dashboard");
@@ -87,6 +105,7 @@ export default function DashboardPage() {
   const missingCount = data.data_quality?.missing_sources?.length || 0;
   const staleCount = data.data_quality?.stale_sources?.length || 0;
   const unconfirmedCount = data.data_quality?.unconfirmed_items?.length || 0;
+  const decisionTrace = data.decision_trace || undefined;
 
   if (
     typeof safeAmount !== "number" &&
@@ -207,6 +226,80 @@ export default function DashboardPage() {
           </Link>
         </article>
       </section>
+
+      {decisionTrace && (
+        <section className="agent-trace" aria-labelledby="agent-trace-title">
+          <div className="agent-trace-header">
+            <div>
+              <p className="card-kicker">검증 가능한 에이전트 판단</p>
+              <h2 id="agent-trace-title">위험에서 추천까지 확인한 과정</h2>
+              <p>
+                {decisionTrace.mode === "LUNA"
+                  ? "Luna가 선택한 근거와 금융 코어의 검증 결과만 공개합니다."
+                  : "결정론적 조사기가 확인한 근거와 금융 코어의 검증 결과를 공개합니다."}{" "}
+                숨겨진 모델 추론은 표시하지 않습니다.
+              </p>
+            </div>
+            <div className="agent-mode">
+              <span className={decisionTrace.mode === "LUNA" ? "is-luna" : ""}>
+                {agentModeLabel(decisionTrace.mode)}
+              </span>
+              {decisionTrace.model && (
+                <small>
+                  {decisionTrace.mode === "LUNA"
+                    ? decisionTrace.model
+                    : `연결 대상 · ${decisionTrace.model}`}
+                </small>
+              )}
+            </div>
+          </div>
+
+          {decisionTrace.fallback_reason && (
+            <div className="agent-fallback">
+              <Icon name="info" size={17} />
+              <span>
+                {decisionTrace.fallback_reason === "OPENAI_API_KEY_NOT_CONFIGURED"
+                  ? "API 키가 없어 기존 결정론적 조사기로 안전하게 분석했습니다."
+                  : "Luna 호출을 완료하지 못해 기존 결정론적 조사기로 안전하게 분석했습니다."}
+              </span>
+            </div>
+          )}
+
+          <ol className="agent-trace-list">
+            {decisionTrace.steps.map((step) => (
+              <li key={`${step.sequence}-${step.kind}-${step.candidate_id || ""}`}>
+                <span className="trace-sequence">
+                  {String(step.sequence).padStart(2, "0")}
+                </span>
+                <div>
+                  <div className="trace-meta">
+                    <span>{traceKindLabel(step.kind)}</span>
+                    <small className={`trace-status status-${step.status.toLowerCase()}`}>
+                      {step.status === "REJECTED"
+                        ? "탈락"
+                        : step.status === "NEEDS_REVIEW"
+                          ? "검토 필요"
+                          : step.status === "FAILED"
+                            ? "확인 실패"
+                            : "완료"}
+                    </small>
+                  </div>
+                  <h3>{step.title}</h3>
+                  <p>{step.summary}</p>
+                  {(step.tool_name || step.candidate_id) && (
+                    <code>{step.tool_name || step.candidate_id}</code>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+
+          <p className="agent-disclosure">
+            <Icon name="shield" size={16} />
+            {decisionTrace.disclosure}
+          </p>
+        </section>
+      )}
 
       <section className="analysis-strip" aria-label="분석 정보">
         <DataFact

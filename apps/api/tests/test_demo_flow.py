@@ -50,7 +50,10 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         analysis = client.post(
             "/api/v1/analyses",
             headers=headers,
-            json={"trigger_type": "DATA_REFRESH"},
+            json={
+                "trigger_type": "DATA_REFRESH",
+                "as_of": "2026-07-24T09:00:00+09:00",
+            },
         )
         assert analysis.status_code == 201
         assert analysis.json()["status"] == "COMPLETED"
@@ -58,7 +61,10 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         analysis = client.post(
             "/api/v1/analyses",
             headers=headers,
-            json={"trigger_type": "DATA_REFRESH"},
+            json={
+                "trigger_type": "DATA_REFRESH",
+                "as_of": "2026-07-24T09:00:00+09:00",
+            },
         )
         assert analysis.status_code == 201
         assert analysis.json()["status"] == "COMPLETED"

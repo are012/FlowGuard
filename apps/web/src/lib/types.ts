@@ -101,6 +101,33 @@ export interface PolicyViolation {
   action_id?: string;
 }
 
+export interface AgentTraceStep {
+  sequence: number;
+  kind: string;
+  title: string;
+  summary: string;
+  status: string;
+  tool_name?: string | null;
+  candidate_id?: string | null;
+  evidence_ids?: string[];
+}
+
+export interface AgentDecisionTrace {
+  mode: string;
+  model?: string | null;
+  status: string;
+  fallback_reason?: string | null;
+  disclosure: string;
+  steps: AgentTraceStep[];
+  evidence_summary?: string[];
+  unresolved_questions?: string[];
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  } | null;
+}
+
 export interface DashboardResponse {
   analysis_run_id?: string;
   snapshot_id?: string;
@@ -111,6 +138,7 @@ export interface DashboardResponse {
   risk_metrics?: RiskMetrics;
   presentation?: RiskPresentation;
   recommendation?: Recommendation | null;
+  decision_trace?: AgentDecisionTrace | null;
   data_quality?: DataQuality;
   last_successful_analysis_at?: string | null;
 }

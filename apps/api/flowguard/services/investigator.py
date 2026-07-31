@@ -42,10 +42,15 @@ class RiskEvidenceBuilder:
                 http_status=422,
             )
 
+        gathered_evidence, evidence_gaps = self._build_evidence(
+            snapshot_id,
+            context,
+            call,
+        )
         return {
             "risk": self._build_risk(metrics),
-            "gathered_evidence": self._build_evidence(snapshot_id, context),
-            "evidence_gaps": self._build_evidence_gaps(snapshot_id, context),
+            "gathered_evidence": gathered_evidence,
+            "evidence_gaps": evidence_gaps,
             "context": context,
         }
 
@@ -62,26 +67,34 @@ class RiskEvidenceBuilder:
             "shortageAmount": gap,
         }
 
-    def _build_evidence(self, snapshot_id: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+    def _build_evidence(
+        self,
+        snapshot_id: str,
+        context: dict[str, Any],
+        call: Callable[[str, dict[str, Any], Callable[[], dict[str, Any]]], dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         evidence: list[dict[str, Any]] = []
-        for receivable in context.get("receivables", [])[:2]:
-            counterparty_id = receivable.get("counterparty_id")
-            if not counterparty_id:
-                continue
-            try:
-                evidence.append(self.tools.get_counterparty_evidence(snapshot_id, counterparty_id))
-            except ServiceError:
-                continue
-        return evidence
-
-    def _build_evidence_gaps(self, snapshot_id: str, context: dict[str, Any]) -> list[dict[str, Any]]:
         evidence_gaps: list[dict[str, Any]] = []
         for receivable in context.get("receivables", [])[:2]:
             counterparty_id = receivable.get("counterparty_id")
             if not counterparty_id:
                 continue
             try:
-                self.tools.get_counterparty_evidence(snapshot_id, counterparty_id)
+                evidence.append(
+                    call(
+                        "get_counterparty_evidence",
+                        {
+                            "snapshot_id": snapshot_id,
+                            "counterparty_id": counterparty_id,
+                        },
+                        lambda counterparty_id=counterparty_id: (
+                            self.tools.get_counterparty_evidence(
+                                snapshot_id,
+                                counterparty_id,
+                            )
+                        ),
+                    )
+                )
             except ServiceError as exc:
                 if exc.code == "INSUFFICIENT_DATA":
                     evidence_gaps.append(
@@ -93,7 +106,7 @@ class RiskEvidenceBuilder:
                     )
                 else:
                     raise
-        return evidence_gaps
+        return evidence, evidence_gaps
 
 
 class ActionCandidateService:
@@ -240,7 +253,8 @@ class ActionCandidateService:
                                     "to_date": max(
                                         parsed_risk_date,
                                         as_of,
-                                        date.fromisoformat(event["expected_date"]) + timedelta(days=30),
+                                        date.fromisoformat(event["expected_date"])
+                                        + timedelta(days=30),
                                     ).isoformat(),
                                 },
                             }
@@ -278,10 +292,12 @@ class ActionCandidateService:
                     "actions": candidate["actions"],
                     "evaluation_result": evaluation,
                 },
-                lambda candidate=candidate, evaluation=evaluation: self.tools.validate_financial_policy(
-                    snapshot_id,
-                    actions=candidate["actions"],
-                    evaluation_result=evaluation,
+                lambda candidate=candidate, evaluation=evaluation: (
+                    self.tools.validate_financial_policy(
+                        snapshot_id,
+                        actions=candidate["actions"],
+                        evaluation_result=evaluation,
+                    )
                 ),
             )
             risk_shift = evaluation.get("risk_shift", {})
@@ -305,11 +321,23 @@ class ActionCandidateService:
 class LiquidityInvestigator:
     """Select evidence and closed-catalog actions without performing finance math."""
 
-    def __init__(self, repository: FlowGuardRepository, tools: CoreToolService) -> None:
+    def __init__(
+        self,
+        repository: FlowGuardRepository,
+        tools: CoreToolService,
+        *,
+        agent_mode: str = "DETERMINISTIC",
+        agent_model: str | None = None,
+        fallback_reason: str | None = None,
+    ) -> None:
         self.repository = repository
         self.tools = tools
         self.risk_builder = RiskEvidenceBuilder(tools)
         self.action_service = ActionCandidateService(tools)
+        self.agent_mode = agent_mode
+        self.agent_model = agent_model
+        self.fallback_reason = fallback_reason
+        self.prompt_version = "rule-based-investigator-1"
 
     def investigate(
         self,

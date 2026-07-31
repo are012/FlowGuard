@@ -23,6 +23,26 @@ No endpoint performs a real transfer, changes a real card payment date, or appli
 for a financial product. Approving a recommendation creates and analyzes a
 virtual snapshot only.
 
+## Optional Luna investigator
+
+The default `FLOWGUARD_AGENT_MODE=auto` uses OpenAI `gpt-5.6-luna` through the
+Responses API when `OPENAI_API_KEY` is present. Without a key, the API remains
+fully usable and records `DETERMINISTIC_FALLBACK` with
+`OPENAI_API_KEY_NOT_CONFIGURED` in the public decision trace.
+
+Copy `apps/api/.env.example` to `apps/api/.env` and add only the local API key:
+
+```text
+OPENAI_API_KEY=...
+```
+
+The Luna layer chooses which read-only evidence tools and backend-generated
+action candidates to inspect. All balances, dates, simulations, rebound-risk
+checks, and policy decisions remain authoritative outputs of the deterministic
+financial core. The UI exposes a public audit trace of hypotheses, tool calls,
+candidate evaluations, and the selection rationale. It never exposes hidden
+model chain-of-thought.
+
 ## Versioned MVP decisions
 
 The specification marks several rules as `TBD`. The implementation keeps these
