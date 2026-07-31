@@ -28,11 +28,16 @@ class ReportQueryService:
                 http_status=404,
             ) from exc
         latest_run = self.repository.latest_analysis(user_id)
+        interpretation = self._interpretation_summary(report)
         return {
             **report,
             "refresh_status": latest_run["status"] if latest_run else "COMPLETED",
             "analysis_status": latest_run["status"] if latest_run else "COMPLETED",
             "last_successful_analysis_at": report["created_at"],
+            "interpretation": interpretation,
+            "ai_metrics": self.repository.ai_interpretation_metrics(
+                user_id, analysis_id=report["analysis_id"]
+            ),
         }
 
     def dashboard(self, user_id: str) -> dict[str, Any]:
@@ -62,6 +67,8 @@ class ReportQueryService:
             "refresh_status": report["refresh_status"],
             "last_successful_analysis_at": report["last_successful_analysis_at"],
             "is_virtual": report.get("is_virtual", False),
+            "interpretation": report["interpretation"],
+            "ai_metrics": report["ai_metrics"],
         }
 
     def cashflow_timeline(self, user_id: str) -> dict[str, Any]:
@@ -91,6 +98,7 @@ class ReportQueryService:
             "daily_positions": cashflow["daily_positions"],
             "scenarios": scenarios,
             "is_virtual": report.get("is_virtual", False),
+            "interpretation": report["interpretation"],
         }
 
     def next_risk(self, user_id: str) -> dict[str, Any]:
@@ -116,6 +124,20 @@ class ReportQueryService:
             "data_quality": report["data_quality"],
             "triggering_events": triggering_events,
             "causes": [report["presentation"]["cause"]],
+            "interpretation": report["interpretation"],
+        }
+
+    def ai_metrics(self, user_id: str) -> dict[str, Any]:
+        latest_run = self.repository.latest_analysis(user_id)
+        latest_analysis_id = latest_run["analysis_id"] if latest_run else None
+        return {
+            "latest_analysis_id": latest_analysis_id,
+            "current": (
+                self.repository.ai_interpretation_metrics(user_id, analysis_id=latest_analysis_id)
+                if latest_analysis_id
+                else self.repository.ai_interpretation_metrics(user_id)
+            ),
+            "overall": self.repository.ai_interpretation_metrics(user_id),
         }
 
     def receivables(self, user_id: str) -> list[dict[str, Any]]:
@@ -154,3 +176,21 @@ class ReportQueryService:
         from datetime import date
 
         return date.fromisoformat(value)
+
+    @staticmethod
+    def _interpretation_summary(report: dict[str, Any]) -> dict[str, Any]:
+        interpretation = report.get("ai_interpretation", {})
+        if not isinstance(interpretation, dict):
+            interpretation = {}
+        return {
+            "status": report.get("interpretation_status", interpretation.get("source", "UNKNOWN")),
+            "source": interpretation.get("source"),
+            "fallback_reason": interpretation.get("fallbackReason"),
+            "ai_request_id": interpretation.get("aiRequestId"),
+            "correlation_id": interpretation.get("correlationId")
+            or report.get("trace", {}).get("correlation_id"),
+            "model": interpretation.get("model"),
+            "contract_version": interpretation.get("contractVersion"),
+            "prompt_version": interpretation.get("promptVersion"),
+            "attempt_count": interpretation.get("attemptCount"),
+        }

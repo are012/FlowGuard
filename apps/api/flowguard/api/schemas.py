@@ -44,15 +44,26 @@ class FactsPayload(StrictRequest):
 
 class AIToBackendResponse(StrictRequest):
     schemaVersion: Literal["1.0"] = "1.0"
-    analysisId: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
-    riskExplanation: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    analysisId: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+    riskExplanation: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+    ]
     rankedActions: list[AIActionCandidateRef] = Field(default_factory=list)
-    userMessage: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    userMessage: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+    ]
 
 
 class BackendToAIRequest(StrictRequest):
     schemaVersion: Literal["1.0"] = "1.0"
-    analysisId: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    analysisId: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+    snapshotRevision: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
     calculatedAt: AwareDatetime
     facts: FactsPayload
     evidence: list[dict] = Field(default_factory=list)

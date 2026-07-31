@@ -29,13 +29,13 @@ from .snapshots import SnapshotBuilder
 from .tools import CoreToolService
 
 STATUS_MESSAGES = {
-    "SNAPSHOT_BUILDING": "현재 금융정보로 불변 스냅숏을 생성하고 있습니다.",
+    "SNAPSHOT_BUILDING": "현재 금융정보로 분석 스냅샷을 생성하고 있습니다.",
     "BASELINE_ANALYZING": "13주 기준 현금흐름을 계산하고 있습니다.",
     "AGENT_INVESTIGATING": "유동성 위험의 원인과 근거를 조사하고 있습니다.",
     "PLAN_EVALUATING": "후보 대응안을 가상 적용하고 정책을 검증하고 있습니다.",
-    "REPORT_BUILDING": "사용자용 분석 리포트를 만들고 있습니다.",
+    "REPORT_BUILDING": "사용자용 분석 보고서를 만들고 있습니다.",
     "COMPLETED": "분석이 완료되었습니다.",
-    "FAILED": "분석에 실패했습니다.",
+    "FAILED": "분석이 실패했습니다.",
 }
 
 
@@ -57,7 +57,24 @@ class AnalysisOrchestrator:
         self.investigator = investigator or LiquidityInvestigator(repository, self.tools)
         self.cashflow_service = CashflowAnalysisService(self.tools)
         self.ai_client = ai_client or AIInterpretationClient(
-            base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001")
+            base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001"),
+            timeout_seconds=float(os.getenv("FLOWGUARD_AI_TIMEOUT_SECONDS", "3")),
+            max_retries=int(os.getenv("FLOWGUARD_AI_MAX_RETRIES", "1")),
+            retry_backoff_seconds=float(
+                os.getenv("FLOWGUARD_AI_RETRY_BACKOFF_SECONDS", "0.25")
+            ),
+            prompt_version=os.getenv("FLOWGUARD_AI_PROMPT_VERSION", "ai-interpretation-v1"),
+            model_name=os.getenv("FLOWGUARD_AI_MODEL_NAME", "ai-service"),
+            max_concurrent_requests=int(
+                os.getenv("FLOWGUARD_AI_MAX_CONCURRENT_REQUESTS", "2")
+            ),
+            circuit_breaker_threshold=int(
+                os.getenv("FLOWGUARD_AI_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5")
+            ),
+            circuit_breaker_open_seconds=float(
+                os.getenv("FLOWGUARD_AI_CIRCUIT_BREAKER_OPEN_SECONDS", "30")
+            ),
+            repository=repository,
         )
 
     def run(
@@ -66,11 +83,12 @@ class AnalysisOrchestrator:
         *,
         trigger_type: str = "MANUAL",
         as_of: datetime | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         run = self.repository.create_analysis(
             user_id,
             trigger_type=trigger_type,
-            metadata=self._metadata(is_virtual=False),
+            metadata=self._metadata(is_virtual=False, request_id=request_id),
         )
         analysis_id = run["analysis_id"]
         try:
@@ -85,6 +103,7 @@ class AnalysisOrchestrator:
                 is_virtual=False,
                 base_snapshot_id=None,
                 current_state_revision=current_state_revision,
+                correlation_id=request_id,
             )
         except ServiceError as exc:
             return self._fail(analysis_id, exc)
@@ -98,6 +117,7 @@ class AnalysisOrchestrator:
         base_snapshot_id: str,
         actions: list[dict[str, Any]],
         expected_current_state_revision: str,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Apply approved actions to a new snapshot and fully reanalyze it.
 
@@ -107,7 +127,11 @@ class AnalysisOrchestrator:
         run = self.repository.create_analysis(
             user_id,
             trigger_type="RECOMMENDATION_APPROVAL",
-            metadata=self._metadata(is_virtual=True, base_snapshot_id=base_snapshot_id),
+            metadata=self._metadata(
+                is_virtual=True,
+                base_snapshot_id=base_snapshot_id,
+                request_id=request_id,
+            ),
         )
         analysis_id = run["analysis_id"]
         try:
@@ -136,7 +160,7 @@ class AnalysisOrchestrator:
             if snapshot.user_id != user_id:
                 raise ServiceError(
                     "SNAPSHOT_NOT_FOUND",
-                    "기준 금융 스냅숏을 찾을 수 없습니다.",
+                    "기준 금융 스냅샷을 찾을 수 없습니다.",
                     details={"snapshot_id": base_snapshot_id},
                     http_status=404,
                 )
@@ -153,6 +177,7 @@ class AnalysisOrchestrator:
                 is_virtual=True,
                 base_snapshot_id=base_snapshot_id,
                 current_state_revision=live_revision,
+                correlation_id=request_id,
             )
         except ServiceError as exc:
             return self._fail(analysis_id, exc)
@@ -168,6 +193,7 @@ class AnalysisOrchestrator:
         is_virtual: bool,
         base_snapshot_id: str | None,
         current_state_revision: str,
+        correlation_id: str | None,
     ) -> dict[str, Any]:
         self.repository.transition_analysis(
             analysis_id,
@@ -241,22 +267,37 @@ class AnalysisOrchestrator:
                 "model_name": "flowguard-deterministic-core",
                 "model_version": baseline.get("model_version", FINANCIAL_CORE_VERSION),
                 "prompt_version": "rule-based-investigator-1",
+                "ai_prompt_version": os.getenv(
+                    "FLOWGUARD_AI_PROMPT_VERSION", "ai-interpretation-v1"
+                ),
                 "tool_version": baseline.get("tool_version"),
                 "policy_version": POLICY_VERSION,
                 "presentation_rule_version": RISK_RULE_VERSION,
                 "simulation_seed": DEFAULT_SIMULATION_SEED,
             },
+            "trace": {"correlation_id": correlation_id},
             "created_at": utc_now().isoformat(),
         }
-        interpretation = self._interpret_analysis(analysis_id, report)
+        interpretation = self._interpret_analysis(
+            analysis_id,
+            user_id,
+            report,
+            current_state_revision=current_state_revision,
+            correlation_id=correlation_id,
+        )
         report["ai_interpretation"] = interpretation
+        report["interpretation_status"] = interpretation["source"].upper()
+        latest_report_eligible = (
+            self.repository.current_state_revision(user_id) == current_state_revision
+        )
+        report["latest_report_eligible"] = latest_report_eligible
         self.repository.save_report(
             analysis_id=analysis_id,
             user_id=user_id,
             snapshot_id=snapshot.snapshot_id,
             payload=report,
         )
-        return self.repository.transition_analysis(
+        completed = self.repository.transition_analysis(
             analysis_id,
             "COMPLETED",
             message=STATUS_MESSAGES["COMPLETED"],
@@ -264,11 +305,24 @@ class AnalysisOrchestrator:
                 "report_available": True,
                 "is_virtual": is_virtual,
                 "base_snapshot_id": base_snapshot_id,
+                "latest_report_promoted": latest_report_eligible,
+                "interpretation_status": report["interpretation_status"],
             },
         )
+        if latest_report_eligible:
+            self.repository.promote_latest_report(user_id=user_id, analysis_id=analysis_id)
+        return completed
 
-    def _interpret_analysis(self, analysis_id: str, report: dict[str, Any]) -> dict[str, Any]:
-        payload = self._build_ai_request_payload(report)
+    def _interpret_analysis(
+        self,
+        analysis_id: str,
+        user_id: str,
+        report: dict[str, Any],
+        *,
+        current_state_revision: str,
+        correlation_id: str | None,
+    ) -> dict[str, Any]:
+        payload = self._build_ai_request_payload(report, snapshot_revision=current_state_revision)
         if payload is None:
             return {
                 "analysisId": analysis_id,
@@ -277,10 +331,23 @@ class AnalysisOrchestrator:
                 "userMessage": "AI 해석을 생략하고 규칙 기반 분석 결과를 제공합니다.",
                 "source": "fallback",
                 "fallbackReason": "no_risk_context",
+                "correlationId": correlation_id,
             }
-        return self.ai_client.interpret(analysis_id=analysis_id, payload=payload)
+        return self.ai_client.interpret(
+            analysis_id=analysis_id,
+            payload=payload,
+            user_id=user_id,
+            snapshot_revision=current_state_revision,
+            correlation_id=correlation_id,
+            prompt_version=report["versions"].get("ai_prompt_version"),
+        )
 
-    def _build_ai_request_payload(self, report: dict[str, Any]) -> dict[str, Any] | None:
+    def _build_ai_request_payload(
+        self,
+        report: dict[str, Any],
+        *,
+        snapshot_revision: str,
+    ) -> dict[str, Any] | None:
         next_risk = self._build_next_risk_payload(report.get("risk_metrics", {}))
         cashflow_summary = self._build_cashflow_summary(report.get("cashflow", {}))
         calculated_at = report.get("created_at")
@@ -293,6 +360,7 @@ class AnalysisOrchestrator:
         ):
             return None
         return {
+            "snapshotRevision": snapshot_revision,
             "calculatedAt": calculated_at,
             "facts": {
                 "safeToSpend": safe_to_spend,
@@ -366,6 +434,7 @@ class AnalysisOrchestrator:
         *,
         is_virtual: bool,
         base_snapshot_id: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         return {
             "model_name": "flowguard-deterministic-core",
@@ -375,6 +444,7 @@ class AnalysisOrchestrator:
             "simulation_seed": DEFAULT_SIMULATION_SEED,
             "is_virtual": is_virtual,
             "base_snapshot_id": base_snapshot_id,
+            "request_id": request_id,
         }
 
     def _fail_unexpected(self, analysis_id: str, exception: Exception) -> dict[str, Any]:

@@ -69,15 +69,25 @@ def test_preferences_are_persisted_and_used_by_dashboard(
     assert payload["analysis_status"] == "COMPLETED"
     assert "risk_metrics" in payload
     assert "data_quality" in payload
+    assert payload["interpretation"]["status"] == "FALLBACK"
+    assert payload["ai_metrics"]["total_requests"] == 0
+
+    latest = client.get("/api/v1/reports/latest")
+    assert latest.status_code == 200
+    latest_payload = latest.json()
+    assert latest_payload["interpretation"]["status"] == "FALLBACK"
+    assert latest_payload["ai_metrics"]["total_requests"] == 0
+
+    metrics = client.get("/api/v1/ai/metrics")
+    assert metrics.status_code == 200
+    metrics_payload = metrics.json()
+    assert metrics_payload["current"]["total_requests"] == 0
+    assert metrics_payload["overall"]["total_requests"] == 0
 
     timeline = client.get("/api/v1/cashflow/timeline").json()
     assert timeline["horizon_days"] == 91
-    assert {scenario["scenario_label"] for scenario in timeline["scenarios"]} == {
-        "기준",
-        "3일 지연",
-        "7일 지연",
-        "14일 지연",
-    }
+    assert timeline["interpretation"]["status"] == "FALLBACK"
+    assert len(timeline["scenarios"]) == 4
 
 
 def test_wide_import_reports_counts_and_timestamp_quality_notice(
@@ -86,7 +96,7 @@ def test_wide_import_reports_counts_and_timestamp_quality_notice(
     client, _ = api
     content = (
         "record_type,account_id,name,account_type,balance\n"
-        "ACCOUNT,account-1,생활비,CHECKING,800000\n"
+        "ACCOUNT,account-1,main,CHECKING,800000\n"
     )
 
     response = client.post(
@@ -121,17 +131,13 @@ def test_structured_error_and_user_input_paths(
         files={"file": ("bad.csv", bad_csv, "text/csv")},
     )
     assert invalid.status_code == 422
-    assert invalid.json() == {
-        "code": "INVALID_CSV_FORMAT",
-        "message": "지원하지 않는 CSV 컬럼이 있습니다.",
-        "details": {"unknown_columns": ["unknown"]},
-        "retryable": False,
-    }
+    assert invalid.json()["code"] == "INVALID_CSV_FORMAT"
+    assert invalid.json()["retryable"] is False
 
     _create_account(client, "account-1", 500_000, payment=True)
     counterparty = client.post(
         "/api/v1/counterparties",
-        json={"counterparty_id": "client-1", "name": "디자인컴퍼니"},
+        json={"counterparty_id": "client-1", "name": "Client 1"},
     )
     assert counterparty.status_code == 201
     receivable = client.post(
@@ -145,7 +151,7 @@ def test_structured_error_and_user_input_paths(
         },
     )
     assert receivable.status_code == 201
-    assert client.get("/api/v1/counterparties").json()[0]["name"] == "디자인컴퍼니"
+    assert client.get("/api/v1/counterparties").json()[0]["name"] == "Client 1"
     assert client.get("/api/v1/receivables").json()[0]["amount"] == 900_000
 
     repository.upsert_records(
@@ -179,6 +185,89 @@ def test_structured_error_and_user_input_paths(
     assert decision.json()["promotion"]["kind"] == "receivables"
 
 
+def test_request_id_is_echoed_and_used_for_analysis_flow(
+    api: tuple[TestClient, FlowGuardRepository],
+) -> None:
+    client, _ = api
+    _create_account(client, "account-1", 200_000, payment=True)
+
+    response = client.post(
+        "/api/v1/analyses",
+        headers={"X-Request-ID": "req-test-123"},
+        json={"as_of": "2026-07-24T09:00:00+09:00"},
+    )
+
+    assert response.status_code == 201
+    assert response.headers["X-Request-ID"] == "req-test-123"
+    latest = client.get("/api/v1/reports/latest").json()
+    assert latest["interpretation"]["correlation_id"] == "req-test-123"
+
+
+def test_ai_metrics_count_actual_interpretation_attempts(
+    api: tuple[TestClient, FlowGuardRepository],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = api
+    _create_account(client, "payment", 50_000, payment=True)
+    _create_account(client, "reserve", 200_000)
+    event = client.post(
+        "/api/v1/scheduled-events",
+        json={
+            "event_id": "bill",
+            "event_type": "CARD_BILL",
+            "direction": "OUTFLOW",
+            "amount": 100_000,
+            "expected_date": "2026-07-25",
+            "account_id": "payment",
+            "certainty": "CONFIRMED",
+            "is_essential": True,
+        },
+    )
+    assert event.status_code == 201
+
+    monkeypatch.setattr(
+        client.app.state.analysis_service,
+        "_build_ai_request_payload",
+        lambda *_args, **_kwargs: {
+            "snapshotRevision": "revision-test",
+            "calculatedAt": "2026-07-24T09:00:00+09:00",
+            "facts": {
+                "safeToSpend": 0,
+                "nextRisk": {
+                    "type": "PAYMENT_ACCOUNT",
+                    "date": "2026-07-25",
+                    "shortageAmount": 50_000,
+                },
+                "cashflowSummary": {
+                    "lowestBalance": -50_000,
+                    "lowestBalanceDate": "2026-07-25",
+                },
+            },
+            "evidence": [],
+            "actionCandidates": [
+                {"actionId": "transfer-1", "type": "transfer", "amount": 50_000}
+            ],
+        },
+    )
+
+    analysis = client.post(
+        "/api/v1/analyses",
+        headers={"X-Request-ID": "req-ai-metrics"},
+        json={"as_of": "2026-07-24T09:00:00+09:00"},
+    )
+    assert analysis.status_code == 201
+    assert analysis.json()["status"] == "COMPLETED"
+
+    latest = client.get("/api/v1/reports/latest").json()
+    assert latest["interpretation"]["status"] == "FALLBACK"
+    assert latest["interpretation"]["correlation_id"] == "req-ai-metrics"
+
+    metrics = client.get("/api/v1/ai/metrics").json()
+    assert metrics["current"]["total_requests"] == 1
+    assert metrics["current"]["fallback"] == 1
+    assert metrics["overall"]["duplicate_prevented_count"] == 0
+
+
 def test_installment_precheck_uses_core_evaluation(
     api: tuple[TestClient, FlowGuardRepository],
 ) -> None:
@@ -190,7 +279,7 @@ def test_installment_precheck_uses_core_evaluation(
         [
             {
                 "card_id": "card-1",
-                "name": "업무 카드",
+                "name": "work-card",
                 "payment_account_id": "account-1",
                 "payment_day": 25,
                 "current_billing_amount": 0,

@@ -52,6 +52,7 @@ class RecommendationService:
         recommendation_id: str,
         *,
         reason: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         recommendation = self.get(user_id, recommendation_id)
         self._ensure_current(user_id, recommendation)
@@ -90,6 +91,7 @@ class RecommendationService:
             base_snapshot_id=recommendation["snapshot_id"],
             actions=actions,
             expected_current_state_revision=expected_revision,
+            request_id=request_id,
         )
         if virtual_analysis["status"] != "COMPLETED":
             raise ServiceError(

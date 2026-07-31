@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -47,8 +48,17 @@ def create_app(repository: FlowGuardRepository | None = None) -> FastAPI:
         allow_origins=origins,
         allow_credentials="*" not in origins,
         allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
-        allow_headers=["Content-Type", "X-User-ID"],
+        allow_headers=["Content-Type", "X-Request-ID", "X-User-ID"],
     )
+
+    @app.middleware("http")
+    async def request_id_middleware(request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", "").strip() or f"req-{uuid4()}"
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
     app.include_router(router)
     _register_error_handlers(app)
     return app

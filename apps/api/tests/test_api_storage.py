@@ -106,6 +106,67 @@ def test_analysis_workflow_records_ordered_events_and_latest_completed_report(
         repository.transition_analysis(run["analysis_id"], "FAILED", message="too late")
 
 
+def test_latest_report_pointer_keeps_promoted_report_when_newer_report_is_not_promoted(
+    repository: FlowGuardRepository,
+) -> None:
+    first_snapshot = repository.create_snapshot(
+        "user-1",
+        as_of=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    first_run = repository.create_analysis("user-1", trigger_type="MANUAL")
+    for status in (
+        "SNAPSHOT_BUILDING",
+        "BASELINE_ANALYZING",
+        "AGENT_INVESTIGATING",
+        "PLAN_EVALUATING",
+        "REPORT_BUILDING",
+    ):
+        first_run = repository.transition_analysis(
+            first_run["analysis_id"],
+            status,
+            message=status,
+            snapshot_id=first_snapshot["snapshot_id"] if status == "SNAPSHOT_BUILDING" else None,
+        )
+    repository.save_report(
+        analysis_id=first_run["analysis_id"],
+        user_id="user-1",
+        snapshot_id=first_snapshot["snapshot_id"],
+        payload={"analysis_id": first_run["analysis_id"], "status": "PROMOTED"},
+    )
+    repository.transition_analysis(first_run["analysis_id"], "COMPLETED", message="done")
+    repository.promote_latest_report(user_id="user-1", analysis_id=first_run["analysis_id"])
+
+    second_snapshot = repository.create_snapshot(
+        "user-1",
+        as_of=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    second_run = repository.create_analysis("user-1", trigger_type="MANUAL")
+    for status in (
+        "SNAPSHOT_BUILDING",
+        "BASELINE_ANALYZING",
+        "AGENT_INVESTIGATING",
+        "PLAN_EVALUATING",
+        "REPORT_BUILDING",
+    ):
+        second_run = repository.transition_analysis(
+            second_run["analysis_id"],
+            status,
+            message=status,
+            snapshot_id=second_snapshot["snapshot_id"] if status == "SNAPSHOT_BUILDING" else None,
+        )
+    repository.save_report(
+        analysis_id=second_run["analysis_id"],
+        user_id="user-1",
+        snapshot_id=second_snapshot["snapshot_id"],
+        payload={"analysis_id": second_run["analysis_id"], "status": "STALE"},
+    )
+    repository.transition_analysis(second_run["analysis_id"], "COMPLETED", message="done")
+
+    latest = repository.latest_report("user-1")
+    assert latest["analysis_id"] == first_run["analysis_id"]
+    assert latest["status"] == "PROMOTED"
+
+
 def test_recommendation_decision_is_audited_as_virtual_only(
     repository: FlowGuardRepository,
 ) -> None:

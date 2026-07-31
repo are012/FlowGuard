@@ -212,6 +212,18 @@ class AnalysisReportRow(Base):
     )
 
 
+class LatestReportPointerRow(Base):
+    __tablename__ = "latest_report_pointers"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    analysis_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_reports.analysis_id"), nullable=False, unique=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
 class RecommendationRow(Base):
     __tablename__ = "recommendations"
 
@@ -270,6 +282,45 @@ class ToolExecutionRow(Base):
             "agent_run_id",
             "sequence",
             name="uq_tool_execution_sequence",
+        ),
+    )
+
+
+class AIInterpretationRow(Base):
+    __tablename__ = "ai_interpretations"
+
+    ai_request_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    analysis_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.analysis_id"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    snapshot_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    response_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reuse_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "analysis_id",
+            "snapshot_revision",
+            "contract_version",
+            "prompt_version",
+            name="uq_ai_interpretation_request",
         ),
     )
 
@@ -706,6 +757,11 @@ class FlowGuardRepository:
 
     def latest_report(self, user_id: str) -> dict[str, Any]:
         with self._session() as session:
+            pointer = session.get(LatestReportPointerRow, user_id)
+            if pointer is not None:
+                row = session.get(AnalysisReportRow, pointer.analysis_id)
+                if row is not None and row.user_id == user_id:
+                    return dict(row.payload)
             row = session.scalar(
                 select(AnalysisReportRow)
                 .join(
@@ -722,6 +778,24 @@ class FlowGuardRepository:
             if row is None:
                 raise RecordNotFound(f"latest report for user:{user_id} not found")
             return dict(row.payload)
+
+    def promote_latest_report(self, *, user_id: str, analysis_id: str) -> dict[str, Any]:
+        with self._session() as session:
+            report = session.get(AnalysisReportRow, analysis_id)
+            if report is None or report.user_id != user_id:
+                raise RecordNotFound(f"analysis report:{analysis_id} not found")
+            pointer = session.get(LatestReportPointerRow, user_id)
+            if pointer is None:
+                session.add(
+                    LatestReportPointerRow(
+                        user_id=user_id,
+                        analysis_id=analysis_id,
+                    )
+                )
+            else:
+                pointer.analysis_id = analysis_id
+                pointer.updated_at = utc_now()
+        return self.latest_report(user_id)
 
     def latest_analysis(self, user_id: str) -> dict[str, Any] | None:
         with self._session() as session:
@@ -886,6 +960,170 @@ class FlowGuardRepository:
                 for row in rows
             ]
 
+    def begin_ai_interpretation(
+        self,
+        *,
+        analysis_id: str,
+        user_id: str,
+        snapshot_revision: str,
+        contract_version: str,
+        prompt_version: str,
+        correlation_id: str | None,
+        model_name: str,
+        request_payload: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        ai_request_id = f"ai-{uuid4()}"
+        idempotency_key = (
+            f"{analysis_id}:{snapshot_revision}:{contract_version}:{prompt_version}"
+        )
+        try:
+            with self._session() as session:
+                session.add(
+                    AIInterpretationRow(
+                        ai_request_id=ai_request_id,
+                        analysis_id=analysis_id,
+                        user_id=user_id,
+                        snapshot_revision=snapshot_revision,
+                        contract_version=contract_version,
+                        prompt_version=prompt_version,
+                        idempotency_key=idempotency_key,
+                        status="RUNNING",
+                        correlation_id=correlation_id,
+                        model_name=model_name,
+                        request_payload=jsonable(request_payload),
+                        attempt_count=0,
+                    )
+                )
+        except IntegrityError:
+            existing = self.mark_ai_interpretation_reused(
+                analysis_id=analysis_id,
+                snapshot_revision=snapshot_revision,
+                contract_version=contract_version,
+                prompt_version=prompt_version,
+            )
+            if existing is None:
+                raise StorageConflict("AI interpretation request already exists") from None
+            return existing, False
+        return self.get_ai_interpretation(ai_request_id), True
+
+    def get_ai_interpretation(self, ai_request_id: str) -> dict[str, Any]:
+        with self._session() as session:
+            row = session.get(AIInterpretationRow, ai_request_id)
+            if row is None:
+                raise RecordNotFound(f"ai_interpretation:{ai_request_id} not found")
+            return self._ai_interpretation_dict(row)
+
+    def get_ai_interpretation_by_key(
+        self,
+        *,
+        analysis_id: str,
+        snapshot_revision: str,
+        contract_version: str,
+        prompt_version: str,
+    ) -> dict[str, Any] | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(AIInterpretationRow).where(
+                    AIInterpretationRow.analysis_id == analysis_id,
+                    AIInterpretationRow.snapshot_revision == snapshot_revision,
+                    AIInterpretationRow.contract_version == contract_version,
+                    AIInterpretationRow.prompt_version == prompt_version,
+                )
+            )
+            return self._ai_interpretation_dict(row) if row is not None else None
+
+    def mark_ai_interpretation_reused(
+        self,
+        *,
+        analysis_id: str,
+        snapshot_revision: str,
+        contract_version: str,
+        prompt_version: str,
+    ) -> dict[str, Any] | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(AIInterpretationRow).where(
+                    AIInterpretationRow.analysis_id == analysis_id,
+                    AIInterpretationRow.snapshot_revision == snapshot_revision,
+                    AIInterpretationRow.contract_version == contract_version,
+                    AIInterpretationRow.prompt_version == prompt_version,
+                )
+            )
+            if row is None:
+                return None
+            row.reuse_count += 1
+            row.updated_at = utc_now()
+        return self.get_ai_interpretation_by_key(
+            analysis_id=analysis_id,
+            snapshot_revision=snapshot_revision,
+            contract_version=contract_version,
+            prompt_version=prompt_version,
+        )
+
+    def finalize_ai_interpretation(
+        self,
+        ai_request_id: str,
+        *,
+        status: str,
+        response_payload: Mapping[str, Any] | None = None,
+        error: Mapping[str, Any] | None = None,
+        attempt_count: int | None = None,
+    ) -> dict[str, Any]:
+        with self._session() as session:
+            row = session.get(AIInterpretationRow, ai_request_id)
+            if row is None:
+                raise RecordNotFound(f"ai_interpretation:{ai_request_id} not found")
+            row.status = status
+            row.response_payload = (
+                jsonable(response_payload) if response_payload is not None else None
+            )
+            row.error = jsonable(error) if error is not None else None
+            row.updated_at = utc_now()
+            if attempt_count is not None:
+                row.attempt_count = attempt_count
+            if status in {"SUCCEEDED", "FAILED", "FALLBACK"}:
+                row.completed_at = utc_now()
+        return self.get_ai_interpretation(ai_request_id)
+
+    def ai_interpretation_metrics(
+        self,
+        user_id: str,
+        *,
+        analysis_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._session() as session:
+            statement = select(AIInterpretationRow).where(AIInterpretationRow.user_id == user_id)
+            if analysis_id is not None:
+                statement = statement.where(AIInterpretationRow.analysis_id == analysis_id)
+            rows = session.scalars(statement).all()
+        status_counts = {
+            "RUNNING": 0,
+            "SUCCEEDED": 0,
+            "FAILED": 0,
+            "FALLBACK": 0,
+        }
+        attempt_sum = 0
+        max_attempts = 0
+        duplicate_prevented_count = 0
+        for row in rows:
+            status_counts[row.status] = status_counts.get(row.status, 0) + 1
+            attempt_sum += row.attempt_count
+            max_attempts = max(max_attempts, row.attempt_count)
+            duplicate_prevented_count += row.reuse_count
+        total_requests = len(rows)
+        return {
+            "total_requests": total_requests,
+            "running": status_counts.get("RUNNING", 0),
+            "succeeded": status_counts.get("SUCCEEDED", 0),
+            "failed": status_counts.get("FAILED", 0),
+            "fallback": status_counts.get("FALLBACK", 0),
+            "duplicate_prevented_count": duplicate_prevented_count,
+            "average_attempt_count": (
+                round(attempt_sum / total_requests, 2) if total_requests else 0.0
+            ),
+            "max_attempt_count": max_attempts,
+        }
+
     @staticmethod
     def _id_field(kind: str) -> str:
         try:
@@ -918,6 +1156,29 @@ class FlowGuardRepository:
             "status": row.status,
             "created_at": row.created_at.isoformat(),
             "updated_at": row.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _ai_interpretation_dict(row: AIInterpretationRow) -> dict[str, Any]:
+        return {
+            "ai_request_id": row.ai_request_id,
+            "analysis_id": row.analysis_id,
+            "user_id": row.user_id,
+            "snapshot_revision": row.snapshot_revision,
+            "contract_version": row.contract_version,
+            "prompt_version": row.prompt_version,
+            "idempotency_key": row.idempotency_key,
+            "status": row.status,
+            "correlation_id": row.correlation_id,
+            "model_name": row.model_name,
+            "request_payload": row.request_payload,
+            "response_payload": row.response_payload,
+            "error": row.error,
+            "attempt_count": row.attempt_count,
+            "reuse_count": row.reuse_count,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         }
 
 

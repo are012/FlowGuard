@@ -7,6 +7,7 @@ def test_backend_to_ai_request_accepts_expected_contract() -> None:
     payload = {
         "schemaVersion": "1.0",
         "analysisId": "analysis-001",
+        "snapshotRevision": "revision-7",
         "calculatedAt": "2026-07-26T21:30:00+09:00",
         "facts": {
             "safeToSpend": 180000,
@@ -27,6 +28,7 @@ def test_backend_to_ai_request_accepts_expected_contract() -> None:
     model = BackendToAIRequest.model_validate(payload)
 
     assert model.analysisId == "analysis-001"
+    assert model.snapshotRevision == "revision-7"
     assert model.facts.safeToSpend == 180000
     assert model.facts.nextRisk.shortageAmount == 240000
 

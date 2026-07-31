@@ -21,6 +21,7 @@ from .dependencies import (
     get_recommendation_service,
     get_report_service,
     get_repository,
+    get_request_id,
     get_user_id,
 )
 from .schemas import (
@@ -45,6 +46,7 @@ router = APIRouter()
 api = APIRouter(prefix="/api/v1")
 
 UserId = Annotated[str, Depends(get_user_id)]
+RequestId = Annotated[str, Depends(get_request_id)]
 Data = Annotated[DataService, Depends(get_data_service)]
 Analyses = Annotated[AnalysisOrchestrator, Depends(get_analysis_service)]
 Recommendations = Annotated[RecommendationService, Depends(get_recommendation_service)]
@@ -355,8 +357,18 @@ def installment_precheck(
 
 
 @api.post("/analyses", status_code=status.HTTP_201_CREATED)
-def create_analysis(body: AnalysisRequest, user_id: UserId, analyses: Analyses) -> dict[str, Any]:
-    return analyses.run(user_id, trigger_type=body.trigger_type, as_of=body.as_of)
+def create_analysis(
+    body: AnalysisRequest,
+    user_id: UserId,
+    request_id: RequestId,
+    analyses: Analyses,
+) -> dict[str, Any]:
+    return analyses.run(
+        user_id,
+        trigger_type=body.trigger_type,
+        as_of=body.as_of,
+        request_id=request_id,
+    )
 
 
 @api.get("/analyses/{analysis_id}")
@@ -392,6 +404,11 @@ def latest_report(user_id: UserId, reports: Reports) -> dict[str, Any]:
     return reports.latest(user_id)
 
 
+@api.get("/ai/metrics")
+def ai_metrics(user_id: UserId, reports: Reports) -> dict[str, Any]:
+    return reports.ai_metrics(user_id)
+
+
 @api.get("/cashflow/timeline")
 def cashflow_timeline(user_id: UserId, reports: Reports) -> dict[str, Any]:
     return reports.cashflow_timeline(user_id)
@@ -421,9 +438,15 @@ def approve_recommendation(
     recommendation_id: str,
     body: RecommendationDecision,
     user_id: UserId,
+    request_id: RequestId,
     recommendations: Recommendations,
 ) -> dict[str, Any]:
-    return recommendations.approve(user_id, recommendation_id, reason=body.reason)
+    return recommendations.approve(
+        user_id,
+        recommendation_id,
+        reason=body.reason,
+        request_id=request_id,
+    )
 
 
 @api.post("/recommendations/{recommendation_id}/reject")
