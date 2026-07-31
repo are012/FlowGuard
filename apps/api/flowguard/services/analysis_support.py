@@ -40,6 +40,7 @@ class AIInterpretationClient:
         timeout_seconds: float = 3.0,
         max_retries: int = 1,
         retry_backoff_seconds: float = 0.25,
+        max_response_bytes: int = 32_768,
         prompt_version: str = "ai-interpretation-v1",
         model_name: str = "ai-service",
         max_concurrent_requests: int = 2,
@@ -51,6 +52,7 @@ class AIInterpretationClient:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max(0, max_retries)
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+        self.max_response_bytes = max(1_024, max_response_bytes)
         self.prompt_version = prompt_version
         self.model_name = model_name
         self.repository = repository
@@ -375,7 +377,14 @@ class AIInterpretationClient:
         )
         try:
             with request.urlopen(http_request, timeout=self.timeout_seconds) as response:
-                return json.loads(response.read().decode("utf-8"))
+                raw_body = response.read(self.max_response_bytes + 1)
+                if len(raw_body) > self.max_response_bytes:
+                    raise _AITransportError(
+                        "response_too_large",
+                        retryable=False,
+                        details={"max_response_bytes": self.max_response_bytes},
+                    )
+                return json.loads(raw_body.decode("utf-8"))
         except error.HTTPError as exc:
             retryable = exc.code in {429, 502, 503, 504}
             raise _AITransportError(
@@ -385,7 +394,7 @@ class AIInterpretationClient:
             ) from exc
         except (error.URLError, TimeoutError) as exc:
             raise _AITransportError("timeout_or_error", retryable=True) from exc
-        except (ValueError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             raise _AITransportError("invalid_response", retryable=False) from exc
 
     def _fallback(
@@ -405,19 +414,19 @@ class AIInterpretationClient:
         risk_date = risk.get("date")
         shortage_amount = risk.get("shortageAmount")
         risk_type = risk.get("type")
-        explanation = "규칙 기반으로 위험을 요약했습니다."
+        explanation = "규칙 기반 분석으로 위험 요약을 제공합니다."
         if isinstance(risk_date, str) and isinstance(shortage_amount, int):
             if risk_type:
-                explanation = f"{risk_date}에 {shortage_amount:,}원 부족이 예상됩니다."
+                explanation = f"{risk_date}에 {shortage_amount:,}원 부족 위험이 예상됩니다."
             else:
                 explanation = f"{risk_date}에 자금 부족 가능성이 있습니다."
-        message = "AI 해석이 불안정해 규칙 기반 안내를 제공합니다."
+        message = "AI 해석 대신 백엔드 계산 결과를 기준으로 안내합니다."
         first_action = self._first_feasible_action(action_candidates)
         if first_action is not None:
             action_type = first_action.get("type")
             amount = first_action.get("amount")
             if action_type == "transfer" and isinstance(amount, int):
-                message = f"결제일 전에 검증된 이체 후보 {amount:,}원을 먼저 검토해 주세요."
+                message = f"검증된 이체 후보 {amount:,}원을 먼저 검토해 주세요."
             elif isinstance(action_type, str):
                 message = f"검증된 {action_type} 대응안을 먼저 검토해 주세요."
         return {

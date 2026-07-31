@@ -1104,11 +1104,19 @@ class FlowGuardRepository:
         }
         attempt_sum = 0
         max_attempts = 0
+        latency_sum = 0
+        latency_count = 0
+        max_latency_ms = 0
         duplicate_prevented_count = 0
         for row in rows:
             status_counts[row.status] = status_counts.get(row.status, 0) + 1
             attempt_sum += row.attempt_count
             max_attempts = max(max_attempts, row.attempt_count)
+            latency_ms = self._latency_ms(row)
+            if latency_ms is not None:
+                latency_sum += latency_ms
+                latency_count += 1
+                max_latency_ms = max(max_latency_ms, latency_ms)
             duplicate_prevented_count += row.reuse_count
         total_requests = len(rows)
         return {
@@ -1122,6 +1130,10 @@ class FlowGuardRepository:
                 round(attempt_sum / total_requests, 2) if total_requests else 0.0
             ),
             "max_attempt_count": max_attempts,
+            "average_latency_ms": (
+                round(latency_sum / latency_count, 2) if latency_count else 0.0
+            ),
+            "max_latency_ms": max_latency_ms,
         }
 
     @staticmethod
@@ -1174,12 +1186,26 @@ class FlowGuardRepository:
             "request_payload": row.request_payload,
             "response_payload": row.response_payload,
             "error": row.error,
+            "error_code": (
+                row.error.get("reason")
+                if isinstance(row.error, dict) and isinstance(row.error.get("reason"), str)
+                else None
+            ),
             "attempt_count": row.attempt_count,
             "reuse_count": row.reuse_count,
+            "fallback_used": row.status == "FALLBACK",
+            "latency_ms": FlowGuardRepository._latency_ms(row),
             "created_at": row.created_at.isoformat(),
             "updated_at": row.updated_at.isoformat(),
             "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         }
+
+    @staticmethod
+    def _latency_ms(row: AIInterpretationRow) -> int | None:
+        if row.completed_at is None:
+            return None
+        delta = row.completed_at - row.created_at
+        return max(0, int(delta.total_seconds() * 1000))
 
 
 SQLAlchemyRepository = FlowGuardRepository

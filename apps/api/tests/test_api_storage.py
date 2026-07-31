@@ -214,3 +214,46 @@ t2,a,2026-02-01T09:00:00+09:00,OUTFLOW,500000,월세
     stored = repository.list_records("user-1", "candidates")
     assert stored[0]["status"] == "PENDING"
     assert repository.list_records("user-1", "data_quality_notices")
+
+
+def test_ai_interpretation_dict_and_metrics_include_operational_fields(
+    repository: FlowGuardRepository,
+) -> None:
+    snapshot = repository.create_snapshot(
+        "user-1",
+        as_of=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    run = repository.create_analysis("user-1", trigger_type="MANUAL")
+    repository.transition_analysis(
+        run["analysis_id"],
+        "SNAPSHOT_BUILDING",
+        message="snapshot",
+        snapshot_id=snapshot["snapshot_id"],
+    )
+    tracked, created = repository.begin_ai_interpretation(
+        analysis_id=run["analysis_id"],
+        user_id="user-1",
+        snapshot_revision="revision-1",
+        contract_version="1.0",
+        prompt_version="prompt-1",
+        correlation_id="req-1",
+        model_name="gpt-luna",
+        request_payload={"facts": {}},
+    )
+
+    assert created is True
+    finalized = repository.finalize_ai_interpretation(
+        tracked["ai_request_id"],
+        status="FALLBACK",
+        response_payload={"source": "fallback"},
+        error={"reason": "timeout_or_error"},
+        attempt_count=2,
+    )
+
+    metrics = repository.ai_interpretation_metrics("user-1", analysis_id=run["analysis_id"])
+
+    assert finalized["fallback_used"] is True
+    assert finalized["error_code"] == "timeout_or_error"
+    assert isinstance(finalized["latency_ms"], int)
+    assert metrics["average_latency_ms"] >= 0
+    assert metrics["max_latency_ms"] >= 0

@@ -55,6 +55,16 @@ class AIToBackendResponse(StrictRequest):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
     ]
 
+    @model_validator(mode="after")
+    def validate_ranked_actions(self) -> AIToBackendResponse:
+        action_ids = [item.actionId for item in self.rankedActions]
+        if len(action_ids) != len(set(action_ids)):
+            raise ValueError("rankedActions.actionId must be unique")
+        priorities = [item.priority for item in self.rankedActions]
+        if len(priorities) != len(set(priorities)):
+            raise ValueError("rankedActions.priority must be unique")
+        return self
+
 
 class BackendToAIRequest(StrictRequest):
     schemaVersion: Literal["1.0"] = "1.0"

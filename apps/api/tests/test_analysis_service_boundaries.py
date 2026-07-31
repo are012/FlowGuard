@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from urllib import error
 
 import pytest
 
 from flowguard.services import analysis_support
+from flowguard.services.analysis import AnalysisOrchestrator
 from flowguard.services.analysis_support import AIInterpretationClient
 from flowguard.storage import FlowGuardRepository
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(
+        self,
+        payload: dict[str, object] | None = None,
+        *,
+        raw_body: bytes | None = None,
+    ) -> None:
         self.payload = payload
+        self.raw_body = raw_body
 
     def __enter__(self) -> FakeResponse:
         return self
@@ -20,18 +28,23 @@ class FakeResponse:
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
 
-    def read(self) -> bytes:
+    def read(self, _size: int = -1) -> bytes:
+        if self.raw_body is not None:
+            return self.raw_body
+        assert self.payload is not None
         return json.dumps(self.payload).encode("utf-8")
 
 
 def patch_urlopen(
     monkeypatch: pytest.MonkeyPatch,
-    payload: dict[str, object],
+    payload: dict[str, object] | None = None,
+    *,
+    raw_body: bytes | None = None,
 ) -> None:
     monkeypatch.setattr(
         analysis_support.request,
         "urlopen",
-        lambda *_args, **_kwargs: FakeResponse(payload),
+        lambda *_args, **_kwargs: FakeResponse(payload, raw_body=raw_body),
     )
 
 
@@ -128,6 +141,81 @@ def test_ai_interpretation_client_rejects_unknown_ranked_action(
     assert result["fallbackReason"] == "unknown_ranked_action"
 
 
+def test_ai_interpretation_client_rejects_duplicate_ranked_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AIInterpretationClient(base_url="http://localhost:8001")
+    patch_urlopen(
+        monkeypatch,
+        {
+            "schemaVersion": "1.0",
+            "analysisId": "analysis-001",
+            "riskExplanation": "ok",
+            "rankedActions": [
+                {"actionId": "transfer-1", "priority": 1, "reason": "first"},
+                {"actionId": "transfer-1", "priority": 2, "reason": "duplicate"},
+            ],
+            "userMessage": "ok",
+        },
+    )
+
+    result = client.interpret(
+        analysis_id="analysis-001",
+        payload=_valid_payload(),
+    )
+
+    assert result["source"] == "fallback"
+    assert result["fallbackReason"] == "invalid_response"
+
+
+def test_ai_interpretation_client_rejects_duplicate_priorities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AIInterpretationClient(base_url="http://localhost:8001")
+    patch_urlopen(
+        monkeypatch,
+        {
+            "schemaVersion": "1.0",
+            "analysisId": "analysis-001",
+            "riskExplanation": "ok",
+            "rankedActions": [
+                {"actionId": "transfer-1", "priority": 1, "reason": "first"},
+                {"actionId": "transfer-2", "priority": 1, "reason": "duplicate"},
+            ],
+            "userMessage": "ok",
+        },
+    )
+
+    result = client.interpret(
+        analysis_id="analysis-001",
+        payload={
+            **_valid_payload(),
+            "actionCandidates": [
+                {"actionId": "transfer-1", "type": "transfer", "amount": 240000},
+                {"actionId": "transfer-2", "type": "transfer", "amount": 180000},
+            ],
+        },
+    )
+
+    assert result["source"] == "fallback"
+    assert result["fallbackReason"] == "invalid_response"
+
+
+def test_ai_interpretation_client_falls_back_on_non_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AIInterpretationClient(base_url="http://localhost:8001")
+    patch_urlopen(monkeypatch, raw_body=b"not-json")
+
+    result = client.interpret(
+        analysis_id="analysis-001",
+        payload=_valid_payload(),
+    )
+
+    assert result["source"] == "fallback"
+    assert result["fallbackReason"] == "invalid_response"
+
+
 def test_ai_interpretation_client_retries_retryable_failure_once_and_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -174,6 +262,70 @@ def test_ai_interpretation_client_retries_retryable_failure_once_and_succeeds(
     assert tracked["attempt_count"] == 2
 
 
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_ai_interpretation_client_retries_retryable_http_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    repository = FlowGuardRepository("sqlite:///:memory:")
+    client = AIInterpretationClient(
+        base_url="http://localhost:8001",
+        repository=repository,
+        max_retries=1,
+        retry_backoff_seconds=0,
+    )
+    calls = {"count": 0}
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise error.HTTPError(
+                "http://localhost:8001/interpret",
+                status_code,
+                "temporary",
+                hdrs=None,
+                fp=BytesIO(b""),
+            )
+        return FakeResponse(
+            {
+                "schemaVersion": "1.0",
+                "analysisId": "analysis-001",
+                "riskExplanation": "ok",
+                "rankedActions": [],
+                "userMessage": "ok",
+            }
+        )
+
+    monkeypatch.setattr(analysis_support.request, "urlopen", fake_urlopen)
+
+    result = client.interpret(
+        analysis_id="analysis-001",
+        user_id="demo-user",
+        snapshot_revision="revision-1",
+        correlation_id="req-1",
+        payload=_valid_payload(),
+    )
+
+    assert calls["count"] == 2
+    assert result["source"] == "ai"
+    assert result["attemptCount"] == 2
+
+
+def test_ai_interpretation_client_rejects_oversized_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AIInterpretationClient(base_url="http://localhost:8001", max_response_bytes=32)
+    patch_urlopen(monkeypatch, raw_body=b"{" + (b"x" * 1100))
+
+    result = client.interpret(
+        analysis_id="analysis-001",
+        payload=_valid_payload(),
+    )
+
+    assert result["source"] == "fallback"
+    assert result["fallbackReason"] == "response_too_large"
+
+
 def test_ai_interpretation_client_reuses_cached_result_for_same_request_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -217,3 +369,61 @@ def test_ai_interpretation_client_reuses_cached_result_for_same_request_key(
     assert calls["count"] == 1
     assert first["aiRequestId"] == second["aiRequestId"]
     assert second["source"] == "ai"
+
+
+def test_analysis_orchestrator_sends_minimized_ai_evidence() -> None:
+    orchestrator = AnalysisOrchestrator(FlowGuardRepository("sqlite:///:memory:"))
+    payload = orchestrator._build_ai_request_payload(
+        {
+            "created_at": "2026-07-31T12:00:00+09:00",
+            "safe_to_spend": 180000,
+            "risk_metrics": {
+                "shortfall_type": "PAYMENT_ACCOUNT",
+                "first_risk_date": "2026-08-03",
+                "expected_gap_max": 240000,
+                "triggering_event_ids": ["card-bill:1"],
+            },
+            "cashflow": {
+                "daily_positions": [
+                    {"date": "2026-08-03", "available_balance": -240000},
+                    {"date": "2026-08-04", "available_balance": -100000},
+                ]
+            },
+            "agent": {
+                "gathered_evidence": [
+                    {
+                        "counterparty_id": "cp-1",
+                        "payment_history_count": 4,
+                        "on_time_rate": 0.5,
+                        "average_delay_days": 3.0,
+                        "maximum_delay_days": 7,
+                        "recent_trend": "WORSENING",
+                        "data_confidence": 0.8,
+                    }
+                ],
+                "evidence_gaps": [
+                    {
+                        "counterparty_id": "cp-1",
+                        "code": "INSUFFICIENT_DATA",
+                        "requires_verification": True,
+                    }
+                ],
+                "actionCandidates": [
+                    {
+                        "action_id": "action-1",
+                        "type": "TRANSFER",
+                        "amount": 240000,
+                        "feasible": True,
+                        "riskResolved": True,
+                    }
+                ],
+            },
+        },
+        snapshot_revision="revision-1",
+    )
+
+    assert payload is not None
+    assert payload["evidence"][0]["type"] == "COUNTERPARTY_PAYMENT_PATTERN"
+    assert "counterparty_id" not in payload["evidence"][0]
+    assert payload["actionCandidates"][0]["type"] == "transfer"
+    assert payload["actionCandidates"][0]["riskResolved"] is True

@@ -268,6 +268,89 @@ def test_ai_metrics_count_actual_interpretation_attempts(
     assert metrics["overall"]["duplicate_prevented_count"] == 0
 
 
+def test_fallback_interpretation_keeps_backend_numbers(
+    api: tuple[TestClient, FlowGuardRepository],
+) -> None:
+    client, _ = api
+    _create_account(client, "payment", 50_000, payment=True)
+    _create_account(client, "reserve", 200_000)
+    event = client.post(
+        "/api/v1/scheduled-events",
+        json={
+            "event_id": "bill-fallback",
+            "event_type": "CARD_BILL",
+            "direction": "OUTFLOW",
+            "amount": 100_000,
+            "expected_date": "2026-07-25",
+            "account_id": "payment",
+            "certainty": "CONFIRMED",
+            "is_essential": True,
+        },
+    )
+    assert event.status_code == 201
+
+    analysis = client.post(
+        "/api/v1/analyses",
+        headers={"X-Request-ID": "req-fallback-numbers"},
+        json={"as_of": "2026-07-24T09:00:00+09:00"},
+    )
+    assert analysis.status_code == 201
+
+    latest = client.get("/api/v1/reports/latest").json()
+
+    assert latest["interpretation"]["status"] == "FALLBACK"
+    assert "50,000" in latest["ai_interpretation"]["riskExplanation"]
+    assert "50,000" in latest["ai_interpretation"]["userMessage"]
+
+
+def test_successful_ai_interpretation_is_marked_completed(
+    api: tuple[TestClient, FlowGuardRepository],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = api
+    _create_account(client, "payment", 50_000, payment=True)
+    _create_account(client, "reserve", 200_000)
+    event = client.post(
+        "/api/v1/scheduled-events",
+        json={
+            "event_id": "bill-ai-success",
+            "event_type": "CARD_BILL",
+            "direction": "OUTFLOW",
+            "amount": 100_000,
+            "expected_date": "2026-07-25",
+            "account_id": "payment",
+            "certainty": "CONFIRMED",
+            "is_essential": True,
+        },
+    )
+    assert event.status_code == 201
+
+    monkeypatch.setattr(
+        client.app.state.analysis_service.ai_client,
+        "interpret",
+        lambda **_kwargs: {
+            "analysisId": "analysis-test",
+            "riskExplanation": "설명",
+            "rankedActions": [],
+            "userMessage": "메시지",
+            "source": "ai",
+            "attemptCount": 1,
+        },
+    )
+
+    analysis = client.post(
+        "/api/v1/analyses",
+        headers={"X-Request-ID": "req-ai-success"},
+        json={"as_of": "2026-07-24T09:00:00+09:00"},
+    )
+    assert analysis.status_code == 201
+
+    latest = client.get("/api/v1/reports/latest").json()
+
+    assert latest["interpretation"]["status"] == "COMPLETED"
+    assert latest["ai_interpretation"]["source"] == "ai"
+
+
 def test_installment_precheck_uses_core_evaluation(
     api: tuple[TestClient, FlowGuardRepository],
 ) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from flowguard.api.schemas import AIToBackendResponse, BackendToAIRequest
 
 
@@ -52,3 +54,35 @@ def test_ai_to_backend_response_accepts_ranked_actions() -> None:
 
     assert model.rankedActions[0].actionId == "transfer-1"
     assert model.rankedActions[0].priority == 1
+
+
+def test_ai_to_backend_response_rejects_duplicate_action_ids() -> None:
+    payload = {
+        "schemaVersion": "1.0",
+        "analysisId": "analysis-001",
+        "riskExplanation": "ok",
+        "rankedActions": [
+            {"actionId": "transfer-1", "priority": 1, "reason": "first"},
+            {"actionId": "transfer-1", "priority": 2, "reason": "duplicate"},
+        ],
+        "userMessage": "ok",
+    }
+
+    with pytest.raises(ValueError):
+        AIToBackendResponse.model_validate(payload)
+
+
+def test_ai_to_backend_response_rejects_duplicate_priorities() -> None:
+    payload = {
+        "schemaVersion": "1.0",
+        "analysisId": "analysis-001",
+        "riskExplanation": "ok",
+        "rankedActions": [
+            {"actionId": "transfer-1", "priority": 1, "reason": "first"},
+            {"actionId": "transfer-2", "priority": 1, "reason": "duplicate"},
+        ],
+        "userMessage": "ok",
+    }
+
+    with pytest.raises(ValueError):
+        AIToBackendResponse.model_validate(payload)

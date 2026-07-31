@@ -63,6 +63,7 @@ class AnalysisOrchestrator:
             retry_backoff_seconds=float(
                 os.getenv("FLOWGUARD_AI_RETRY_BACKOFF_SECONDS", "0.25")
             ),
+            max_response_bytes=int(os.getenv("FLOWGUARD_AI_MAX_RESPONSE_BYTES", "32768")),
             prompt_version=os.getenv("FLOWGUARD_AI_PROMPT_VERSION", "ai-interpretation-v1"),
             model_name=os.getenv("FLOWGUARD_AI_MODEL_NAME", "ai-service"),
             max_concurrent_requests=int(
@@ -286,7 +287,7 @@ class AnalysisOrchestrator:
             correlation_id=correlation_id,
         )
         report["ai_interpretation"] = interpretation
-        report["interpretation_status"] = interpretation["source"].upper()
+        report["interpretation_status"] = self._interpretation_status(interpretation)
         latest_report_eligible = (
             self.repository.current_state_revision(user_id) == current_state_revision
         )
@@ -326,9 +327,9 @@ class AnalysisOrchestrator:
         if payload is None:
             return {
                 "analysisId": analysis_id,
-                "riskExplanation": "규칙 기반으로 위험을 요약했습니다.",
+                "riskExplanation": "규칙 기반 분석으로 위험 요약을 제공합니다.",
                 "rankedActions": [],
-                "userMessage": "AI 해석을 생략하고 규칙 기반 분석 결과를 제공합니다.",
+                "userMessage": "AI 해석 없이 백엔드 계산 결과만 제공합니다.",
                 "source": "fallback",
                 "fallbackReason": "no_risk_context",
                 "correlationId": correlation_id,
@@ -351,7 +352,7 @@ class AnalysisOrchestrator:
         next_risk = self._build_next_risk_payload(report.get("risk_metrics", {}))
         cashflow_summary = self._build_cashflow_summary(report.get("cashflow", {}))
         calculated_at = report.get("created_at")
-        safe_to_spend = report.get("safe_to_spend")
+        safe_to_spend = self._safe_to_spend_value(report.get("safe_to_spend"))
         if (
             calculated_at is None
             or not isinstance(safe_to_spend, int)
@@ -367,7 +368,10 @@ class AnalysisOrchestrator:
                 "nextRisk": next_risk,
                 "cashflowSummary": cashflow_summary,
             },
-            "evidence": report.get("agent", {}).get("gathered_evidence", []),
+            "evidence": self._build_ai_evidence(
+                report.get("agent", {}),
+                report.get("risk_metrics", {}),
+            ),
             "actionCandidates": self._build_action_candidates(report.get("agent", {})),
         }
 
@@ -410,6 +414,16 @@ class AnalysisOrchestrator:
         }
 
     @staticmethod
+    def _safe_to_spend_value(value: Any) -> int | None:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, dict):
+            safe_to_spend = value.get("safe_to_spend")
+            if isinstance(safe_to_spend, int):
+                return safe_to_spend
+        return None
+
+    @staticmethod
     def _build_action_candidates(agent_state: dict[str, Any]) -> list[dict[str, Any]]:
         candidates = agent_state.get("actionCandidates", [])
         if not isinstance(candidates, list):
@@ -419,15 +433,75 @@ class AnalysisOrchestrator:
             action_id = candidate.get("action_id")
             if not isinstance(action_id, str) or not action_id:
                 continue
+            candidate_type = candidate.get("type")
             built_candidates.append(
                 {
                     "actionId": action_id,
-                    "type": candidate.get("type"),
+                    "type": (
+                        candidate_type.lower()
+                        if isinstance(candidate_type, str)
+                        else candidate_type
+                    ),
                     "amount": candidate.get("amount"),
                     "feasible": candidate.get("feasible"),
+                    "riskResolved": candidate.get("riskResolved"),
                 }
             )
         return built_candidates
+
+    @staticmethod
+    def _build_ai_evidence(
+        agent_state: dict[str, Any],
+        risk_metrics: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        evidence_items: list[dict[str, Any]] = []
+        for raw in agent_state.get("gathered_evidence", []):
+            if not isinstance(raw, dict):
+                continue
+            summary = {"type": "COUNTERPARTY_PAYMENT_PATTERN"}
+            if isinstance(raw.get("payment_history_count"), int):
+                summary["paymentHistoryCount"] = raw["payment_history_count"]
+            if isinstance(raw.get("average_delay_days"), (int, float)):
+                summary["averageDelayDays"] = raw["average_delay_days"]
+            if isinstance(raw.get("maximum_delay_days"), (int, float)):
+                summary["maximumDelayDays"] = raw["maximum_delay_days"]
+            if isinstance(raw.get("on_time_rate"), (int, float)):
+                summary["onTimeRate"] = raw["on_time_rate"]
+            if isinstance(raw.get("recent_trend"), str):
+                summary["recentTrend"] = raw["recent_trend"]
+            if isinstance(raw.get("data_confidence"), (int, float)):
+                summary["dataConfidence"] = raw["data_confidence"]
+            evidence_items.append(summary)
+        for raw in agent_state.get("evidence_gaps", []):
+            if not isinstance(raw, dict):
+                continue
+            evidence_items.append(
+                {
+                    "type": "EVIDENCE_GAP",
+                    "code": raw.get("code"),
+                    "requiresVerification": raw.get("requires_verification") is True,
+                }
+            )
+        for event_id in risk_metrics.get("triggering_event_ids", [])[:3]:
+            if not isinstance(event_id, str) or not event_id:
+                continue
+            event_type = event_id.split(":", 1)[0].upper().replace("-", "_")
+            evidence_items.append(
+                {
+                    "type": "TRIGGERING_EVENT",
+                    "eventType": event_type,
+                }
+            )
+        return evidence_items
+
+    @staticmethod
+    def _interpretation_status(interpretation: dict[str, Any]) -> str:
+        source = interpretation.get("source")
+        if source == "ai":
+            return "COMPLETED"
+        if source == "fallback":
+            return "FALLBACK"
+        return "FAILED"
 
     @staticmethod
     def _metadata(
