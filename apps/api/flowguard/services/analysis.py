@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -22,6 +23,7 @@ from flowguard.storage import (
 )
 
 from .agent_trace import build_decision_trace
+from .analysis_support import AIInterpretationClient
 from .errors import ServiceError
 from .investigator import LiquidityInvestigator
 from .snapshots import SnapshotBuilder
@@ -48,11 +50,16 @@ class AnalysisOrchestrator:
         snapshot_builder: SnapshotBuilder | None = None,
         tools: CoreToolService | None = None,
         investigator: LiquidityInvestigator | None = None,
+        ai_client: AIInterpretationClient | None = None,
     ) -> None:
         self.repository = repository
         self.snapshot_builder = snapshot_builder or SnapshotBuilder(repository)
         self.tools = tools or CoreToolService(repository)
         self.investigator = investigator or LiquidityInvestigator(repository, self.tools)
+        self.cashflow_service = CashflowAnalysisService(self.tools)
+        self.ai_client = ai_client or AIInterpretationClient(
+            base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001")
+        )
 
     def run(
         self,
@@ -173,8 +180,8 @@ class AnalysisOrchestrator:
                 "base_snapshot_id": base_snapshot_id,
             },
         )
-        baseline = self.tools.simulate_cashflow(snapshot.snapshot_id, seed=DEFAULT_SIMULATION_SEED)
-        safe_to_spend = self.tools.calculate_safe_to_spend(
+        baseline = self.cashflow_service.analyze(snapshot.snapshot_id, seed=DEFAULT_SIMULATION_SEED)
+        safe_to_spend = self.cashflow_service.safe_to_spend(
             snapshot.snapshot_id,
             protection_level=snapshot.preferences.protection_level,
             seed=DEFAULT_SIMULATION_SEED,
@@ -256,6 +263,8 @@ class AnalysisOrchestrator:
             },
             "created_at": utc_now().isoformat(),
         }
+        interpretation = self._interpret_analysis(analysis_id, report)
+        report["ai_interpretation"] = interpretation
         self.repository.save_report(
             analysis_id=analysis_id,
             user_id=user_id,
@@ -272,6 +281,100 @@ class AnalysisOrchestrator:
                 "base_snapshot_id": base_snapshot_id,
             },
         )
+
+    def _interpret_analysis(self, analysis_id: str, report: dict[str, Any]) -> dict[str, Any]:
+        payload = self._build_ai_request_payload(report)
+        if payload is None:
+            return {
+                "analysisId": analysis_id,
+                "riskExplanation": "규칙 기반으로 위험을 요약했습니다.",
+                "rankedActions": [],
+                "userMessage": "AI 해석을 생략하고 규칙 기반 분석 결과를 제공합니다.",
+                "source": "fallback",
+                "fallbackReason": "no_risk_context",
+            }
+        return self.ai_client.interpret(analysis_id=analysis_id, payload=payload)
+
+    def _build_ai_request_payload(self, report: dict[str, Any]) -> dict[str, Any] | None:
+        next_risk = self._build_next_risk_payload(report.get("risk_metrics", {}))
+        cashflow_summary = self._build_cashflow_summary(report.get("cashflow", {}))
+        calculated_at = report.get("created_at")
+        safe_to_spend = report.get("safe_to_spend")
+        if (
+            calculated_at is None
+            or not isinstance(safe_to_spend, int)
+            or next_risk is None
+            or cashflow_summary is None
+        ):
+            return None
+        return {
+            "calculatedAt": calculated_at,
+            "facts": {
+                "safeToSpend": safe_to_spend,
+                "nextRisk": next_risk,
+                "cashflowSummary": cashflow_summary,
+            },
+            "evidence": report.get("agent", {}).get("gathered_evidence", []),
+            "actionCandidates": self._build_action_candidates(report.get("agent", {})),
+        }
+
+    @staticmethod
+    def _build_next_risk_payload(risk_metrics: dict[str, Any]) -> dict[str, Any] | None:
+        risk_date = risk_metrics.get("first_risk_date")
+        shortage_amount = risk_metrics.get("expected_gap_max")
+        risk_type = risk_metrics.get("shortfall_type")
+        if (
+            not isinstance(risk_date, str)
+            or not isinstance(shortage_amount, int)
+            or shortage_amount <= 0
+            or not isinstance(risk_type, str)
+            or not risk_type
+        ):
+            return None
+        return {
+            "type": risk_type,
+            "date": risk_date,
+            "shortageAmount": shortage_amount,
+        }
+
+    @staticmethod
+    def _build_cashflow_summary(cashflow: dict[str, Any]) -> dict[str, Any] | None:
+        daily_positions = cashflow.get("daily_positions")
+        if not isinstance(daily_positions, list) or not daily_positions:
+            return None
+        valid_positions = [
+            position
+            for position in daily_positions
+            if isinstance(position.get("available_balance"), int)
+            and isinstance(position.get("date"), str)
+        ]
+        if not valid_positions:
+            return None
+        lowest_position = min(valid_positions, key=lambda position: position["available_balance"])
+        return {
+            "lowestBalance": lowest_position["available_balance"],
+            "lowestBalanceDate": lowest_position["date"],
+        }
+
+    @staticmethod
+    def _build_action_candidates(agent_state: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates = agent_state.get("actionCandidates", [])
+        if not isinstance(candidates, list):
+            return []
+        built_candidates: list[dict[str, Any]] = []
+        for candidate in candidates:
+            action_id = candidate.get("action_id")
+            if not isinstance(action_id, str) or not action_id:
+                continue
+            built_candidates.append(
+                {
+                    "actionId": action_id,
+                    "type": candidate.get("type"),
+                    "amount": candidate.get("amount"),
+                    "feasible": candidate.get("feasible"),
+                }
+            )
+        return built_candidates
 
     def _metadata(
         self,
@@ -333,4 +436,23 @@ class AnalysisOrchestrator:
             return self.repository.get_analysis(analysis_id)
 
 
-__all__ = ["AnalysisOrchestrator", "STATUS_MESSAGES"]
+class CashflowAnalysisService:
+    def __init__(self, tools: CoreToolService) -> None:
+        self.tools = tools
+
+    def analyze(self, snapshot_id: str, *, seed: int) -> dict[str, Any]:
+        return self.tools.simulate_cashflow(snapshot_id, seed=seed)
+
+    def safe_to_spend(self, snapshot_id: str, *, protection_level: float, seed: int) -> int:
+        return self.tools.calculate_safe_to_spend(
+            snapshot_id,
+            protection_level=protection_level,
+            seed=seed,
+        )
+
+
+__all__ = [
+    "AnalysisOrchestrator",
+    "CashflowAnalysisService",
+    "STATUS_MESSAGES",
+]
