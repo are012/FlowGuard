@@ -22,7 +22,11 @@ import {
   recommendationActions,
   recommendationId,
 } from "@/lib/format";
-import type { Recommendation } from "@/lib/types";
+import type {
+  ActionDefinition,
+  Recommendation,
+  RecommendationComparisonCandidate,
+} from "@/lib/types";
 
 type RecommendationsResponse =
   | Recommendation[]
@@ -78,31 +82,86 @@ function friendlyAssumption(value: string) {
     );
 }
 
+interface RecommendationView {
+  key: string;
+  recommendation: Recommendation;
+  persisted: boolean;
+  comparison?: RecommendationComparisonCandidate;
+}
+
+function comparisonAction(
+  candidate: RecommendationComparisonCandidate,
+): ActionDefinition | undefined {
+  if (!candidate.type) return undefined;
+  return {
+    action_id: candidate.candidate_id,
+    type: candidate.type.toLowerCase(),
+    parameters:
+      typeof candidate.amount === "number" ? { amount: candidate.amount } : {},
+  };
+}
+
+function comparisonViews(items: Recommendation[]): RecommendationView[] {
+  return items.flatMap((recommendation, recommendationIndex) => {
+    const primaryKey =
+      recommendationId(recommendation) || `recommendation-${recommendationIndex}`;
+    const compactComparisons = (recommendation.comparison_candidates || [])
+      .filter((candidate) => !candidate.selected)
+      .map((candidate) => ({
+        key: `comparison-${candidate.candidate_id}`,
+        recommendation,
+        comparison: candidate,
+        persisted: false,
+      }));
+    const fallbackAlternatives =
+      compactComparisons.length > 0
+        ? []
+        : (recommendation.alternatives || []).map((alternative, index) => ({
+            key:
+              recommendationId(alternative) ||
+              `alternative-${primaryKey}-${index}`,
+            recommendation: alternative,
+            persisted: false,
+          }));
+    return [
+      {
+        key: primaryKey,
+        recommendation,
+        persisted: true,
+      },
+      ...compactComparisons,
+      ...fallbackAlternatives,
+    ];
+  });
+}
+
 export default function RecommendationsPage() {
   const { data, error, loading, reload } =
     useRemote<RecommendationsResponse>("/api/v1/recommendations");
-  const [selectedId, setSelectedId] = useState<string>();
-  const [alternativeItems, setAlternativeItems] = useState<Recommendation[]>();
+  const [selectedKey, setSelectedKey] = useState<string>();
   const [busyAction, setBusyAction] = useState<string>();
   const [actionError, setActionError] = useState<string>();
   const [actionSuccess, setActionSuccess] = useState<string>();
 
   const remoteItems = useMemo(() => recommendationsFrom(data), [data]);
-  const items = alternativeItems || remoteItems;
-  const selected =
-    items.find((item) => recommendationId(item) === selectedId) || items[0];
-  const currentId = selected ? recommendationId(selected) : undefined;
+  const views = useMemo(() => comparisonViews(remoteItems), [remoteItems]);
+  const selectedView =
+    views.find((view) => view.key === selectedKey) || views[0];
+  const selected = selectedView?.recommendation;
+  const selectedComparison = selectedView?.comparison;
+  const currentId =
+    selectedView?.persisted && selected ? recommendationId(selected) : undefined;
 
-  async function act(type: "approve" | "reject" | "alternatives") {
-    if (!currentId) {
-      setActionError("추천안 식별자가 없어 요청을 보낼 수 없습니다.");
+  async function act(type: "approve" | "reject") {
+    if (!currentId || !selectedView?.persisted) {
+      setActionError("비교 후보는 읽기 전용입니다. 우선 추천안을 선택해 주세요.");
       return;
     }
     setBusyAction(type);
     setActionError(undefined);
     setActionSuccess(undefined);
     try {
-      const response = await apiRequest<RecommendationsResponse | Recommendation>(
+      await apiRequest<Recommendation>(
         `/api/v1/recommendations/${encodeURIComponent(currentId)}/${type}`,
         {
           method: "POST",
@@ -110,28 +169,49 @@ export default function RecommendationsPage() {
         },
       );
 
-      if (type === "alternatives") {
-        const alternatives = recommendationsFrom(
-          response as RecommendationsResponse,
-        );
-        if (alternatives.length) {
-          setAlternativeItems(alternatives);
-          setSelectedId(recommendationId(alternatives[0]));
-          setActionSuccess(`${alternatives.length}개의 다른 방법을 받았습니다.`);
-        } else {
-          setActionSuccess("API가 반환한 다른 추천안이 없습니다.");
-        }
-      } else {
-        setActionSuccess(
-          type === "approve"
-            ? "추천안을 가상 적용하도록 승인했습니다. 실제 금융거래는 실행되지 않습니다."
-            : "이 추천안을 거절했습니다.",
-        );
-        reload();
-      }
+      setActionSuccess(
+        type === "approve"
+          ? "추천안을 가상 적용하도록 승인했습니다. 실제 금융거래는 실행되지 않습니다."
+          : "이 추천안을 거절했습니다.",
+      );
+      reload();
     } catch (caught) {
       setActionError(
         caught instanceof Error ? caught.message : "추천안 요청을 처리하지 못했습니다.",
+      );
+    } finally {
+      setBusyAction(undefined);
+    }
+  }
+
+  async function showNextComparison() {
+    const comparison = views.find((view) => !view.persisted);
+    if (!comparison) {
+      setActionSuccess("현재 데이터에서 비교 가능한 다른 후보가 없습니다.");
+      return;
+    }
+    if (!currentId) {
+      setActionError("우선 추천안 식별자가 없어 다른 방법을 요청할 수 없습니다.");
+      return;
+    }
+    setBusyAction("alternatives");
+    setActionError(undefined);
+    setActionSuccess(undefined);
+    try {
+      await apiRequest<RecommendationsResponse>(
+        `/api/v1/recommendations/${encodeURIComponent(currentId)}/alternatives`,
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+      );
+      setSelectedKey(comparison.key);
+      setActionSuccess("다른 후보의 가상 검증 결과를 보여드립니다.");
+    } catch (caught) {
+      setActionError(
+        caught instanceof Error
+          ? caught.message
+          : "다른 방법 요청을 기록하지 못했습니다.",
       );
     } finally {
       setBusyAction(undefined);
@@ -154,7 +234,7 @@ export default function RecommendationsPage() {
     );
   }
   if (error && !data) return <ErrorState error={error} onRetry={reload} />;
-  if (!items.length || !selected) {
+  if (!views.length || !selected || !selectedView) {
     return (
       <EmptyState
         icon="recommendations"
@@ -169,20 +249,50 @@ export default function RecommendationsPage() {
     );
   }
 
-  const actions = recommendationActions(selected);
+  const actions = selectedComparison
+    ? [comparisonAction(selectedComparison)].filter(
+        (action): action is ActionDefinition => Boolean(action),
+      )
+    : recommendationActions(selected);
   const primaryAction = actions[0];
   const before = evaluationBefore(selected);
-  const after = evaluationAfter(selected);
-  const shift = selected.evaluation?.risk_shift || selected.risk_shift;
-  const violations =
-    selected.evaluation?.policy_violations ||
-    selected.policy_result?.violations ||
-    selected.policy_violations ||
-    [];
-  const isValid =
-    selected.evaluation?.valid !== false &&
-    selected.policy_result?.valid !== false &&
-    !violations.length;
+  const after = selectedComparison
+    ? {
+        risk_metrics: {
+          expected_gap_max: selectedComparison.after_expected_gap_max ?? undefined,
+        },
+      }
+    : evaluationAfter(selected);
+  const shift =
+    selectedComparison?.risk_shift ||
+    selected.evaluation?.risk_shift ||
+    selected.risk_shift;
+  const violations = selectedComparison
+    ? selectedComparison.policy_violations
+    : selected.evaluation?.policy_violations ||
+      selected.policy_result?.violations ||
+      selected.policy_violations ||
+      [];
+  const isValid = selectedComparison
+    ? selectedComparison.feasible
+    : selected.evaluation?.valid !== false &&
+      selected.policy_result?.valid !== false &&
+      !violations.length;
+  const selectedTitle = selectedComparison
+    ? primaryAction
+      ? actionLabel(primaryAction)
+      : selectedComparison.type || "비교 후보"
+    : selected.title ||
+      (primaryAction ? actionLabel(primaryAction) : "추천 행동 정보 없음");
+  const selectedRationale = selectedComparison
+    ? selectedComparison.rejection_reason ||
+      (selectedComparison.feasible
+        ? "금융 코어와 안전정책 검증을 통과한 비교 후보입니다."
+        : "금융 코어 또는 안전정책 검증을 통과하지 못한 후보입니다.")
+    : selected.rationale ||
+      selected.summary ||
+      selected.reason ||
+      "API 응답에 추천 근거가 포함되지 않았습니다.";
 
   return (
     <>
@@ -192,35 +302,82 @@ export default function RecommendationsPage() {
         description="현재 위험만 줄이는 것이 아니라, 이후 13주에 문제가 옮겨가지 않는지 금융 코어가 다시 계산한 결과입니다."
         action={
           <span className="recommendation-count">
-            <strong>{items.length}</strong>
+            <strong>{views.length}</strong>
             <span>검토 가능한 방법</span>
           </span>
         }
       />
 
       <div className="recommendations-layout">
-        <aside className="recommendation-selector card card-flat">
-          <p className="eyebrow">추천 순서</p>
+        <aside
+          className="recommendation-selector card card-flat"
+          data-testid="recommendation-comparison"
+        >
+          <p className="eyebrow">대응안 비교</p>
           <div>
-            {items.map((item, index) => {
-              const id = recommendationId(item);
-              const action = recommendationActions(item)[0];
-              const active = item === selected;
+            {views.map((view, index) => {
+              const item = view.recommendation;
+              const comparison = view.comparison;
+              const action = comparison
+                ? comparisonAction(comparison)
+                : recommendationActions(item)[0];
+              const itemAfter = comparison
+                ? comparison.after_expected_gap_max
+                : evaluationAfter(item)?.risk_metrics?.expected_gap_max;
+              const itemViolations = comparison
+                ? comparison.policy_violations
+                : item.evaluation?.policy_violations ||
+                  item.policy_result?.violations ||
+                  item.policy_violations ||
+                  [];
+              const itemValid = comparison
+                ? comparison.feasible
+                : item.evaluation?.valid !== false &&
+                  item.policy_result?.valid !== false &&
+                  itemViolations.length === 0;
+              const itemReason =
+                comparison?.rejection_reason ||
+                itemViolations[0]?.message ||
+                itemViolations[0]?.code ||
+                (comparison?.risk_shift?.detected
+                  ? comparison.risk_shift.message || "다음 위험일로 문제가 이동합니다."
+                  : null);
+              const active = view === selectedView;
               return (
                 <button
                   className={active ? "active" : ""}
-                  key={id || index}
-                  onClick={() => setSelectedId(id)}
+                  data-candidate-id={comparison?.candidate_id || view.key}
+                  key={view.key}
+                  onClick={() => setSelectedKey(view.key)}
                   type="button"
                 >
                   <span>{String(index + 1).padStart(2, "0")}</span>
                   <div>
                     <strong>
-                      {item.title || (action ? actionLabel(action) : "행동 정보 없음")}
+                      {comparison
+                        ? action
+                          ? actionLabel(action)
+                          : comparison.type || "비교 후보"
+                        : item.title ||
+                          (action ? actionLabel(action) : "행동 정보 없음")}
                     </strong>
-                    <small>
-                      {index === 0 ? "우선 추천" : "다른 방법"}
-                    </small>
+                    <small>{view.persisted ? "우선 추천" : "읽기 전용 비교"}</small>
+                    <span className="candidate-comparison-meta">
+                      <span className={itemValid ? "valid" : "invalid"}>
+                        {itemValid ? "정책 통과" : "탈락"}
+                      </span>
+                      <span>
+                        적용 후 부족{" "}
+                        {typeof itemAfter === "number"
+                          ? formatWon(itemAfter)
+                          : "정보 없음"}
+                      </span>
+                    </span>
+                    {itemReason && (
+                      <small className="candidate-rejection-reason">
+                        {itemReason}
+                      </small>
+                    )}
                   </div>
                   <Icon name="arrow" size={16} />
                 </button>
@@ -240,17 +397,11 @@ export default function RecommendationsPage() {
                 {isValid ? "안전정책 확인" : "정책 확인 필요"}
               </span>
             </div>
-            <p className="eyebrow">FlowGuard 우선 추천</p>
-            <h2>
-              {selected.title ||
-                (primaryAction ? actionLabel(primaryAction) : "추천 행동 정보 없음")}
-            </h2>
-            <p className="plan-rationale">
-              {selected.rationale ||
-                selected.summary ||
-                selected.reason ||
-                "API 응답에 추천 근거가 포함되지 않았습니다."}
+            <p className="eyebrow">
+              {selectedView.persisted ? "FlowGuard 우선 추천" : "비교 후보"}
             </p>
+            <h2>{selectedTitle}</h2>
+            <p className="plan-rationale">{selectedRationale}</p>
 
             {actions.length > 0 && (
               <div className="plan-actions">
@@ -280,6 +431,60 @@ export default function RecommendationsPage() {
                   </article>
                 ))}
               </div>
+            )}
+
+            {selectedView.persisted && selected.derivation && (
+              <details
+                className="recommendation-evidence"
+                data-testid="recommendation-evidence"
+              >
+                <summary>왜 이 금액인가요?</summary>
+                <p>
+                  추천 금액 <strong>{formatWon(selected.derivation.amount)}</strong>은
+                  {selected.derivation.source_field ===
+                  "risk_metrics.expected_gap_max"
+                    ? " 적용 전 최대 예상 부족액 "
+                    : " 조정 대상 금액 "}
+                  <strong>{formatWon(selected.derivation.source_value)}</strong>을
+                  기준으로 산출했습니다.
+                </p>
+                <dl>
+                  <div>
+                    <dt>산출 기준</dt>
+                    <dd>{selected.derivation.source_field}</dd>
+                  </div>
+                  <div>
+                    <dt>계산식</dt>
+                    <dd>{selected.derivation.formula}</dd>
+                  </div>
+                  <div>
+                    <dt>근거 이벤트</dt>
+                    <dd>
+                      {selected.derivation.evidence_ids.length
+                        ? selected.derivation.evidence_ids.join(", ")
+                        : "연결된 이벤트 없음"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>스냅숏 · revision</dt>
+                    <dd>
+                      {selected.derivation.snapshot_id} ·{" "}
+                      {selected.derivation.revision}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>검증 버전</dt>
+                    <dd>
+                      {selected.derivation.tool_version || "도구 버전 정보 없음"} ·{" "}
+                      {selected.derivation.policy_version}
+                    </dd>
+                  </div>
+                </dl>
+                <Link className="inline-link" href="/risk">
+                  위험 이벤트 자세히 보기
+                  <Icon name="arrow" size={16} />
+                </Link>
+              </details>
             )}
           </section>
 
@@ -359,6 +564,14 @@ export default function RecommendationsPage() {
                 ))}
               </div>
             )}
+            {selectedComparison?.rejection_reason && !violations.length && (
+              <div className="policy-violations">
+                <p>
+                  <Icon name="risk" size={16} />
+                  {selectedComparison.rejection_reason}
+                </p>
+              </div>
+            )}
           </section>
 
           <section className="approval-card">
@@ -373,33 +586,52 @@ export default function RecommendationsPage() {
             {actionSuccess && (
               <SubmitNotice kind="success">{actionSuccess}</SubmitNotice>
             )}
-            <div className="approval-actions">
-              <button
-                className="button button-danger"
-                disabled={Boolean(busyAction)}
-                onClick={() => act("reject")}
-                type="button"
-              >
-                {busyAction === "reject" ? "거절하는 중..." : "이 추천 거절"}
-              </button>
-              <button
-                className="button button-secondary"
-                disabled={Boolean(busyAction)}
-                onClick={() => act("alternatives")}
-                type="button"
-              >
-                {busyAction === "alternatives" ? "찾는 중..." : "다른 방법 보기"}
-              </button>
-              <button
-                className="button button-primary"
-                disabled={Boolean(busyAction) || !isValid || Boolean(shift?.detected)}
-                onClick={() => act("approve")}
-                type="button"
-              >
-                {busyAction === "approve" ? "승인하는 중..." : "가상 적용 승인"}
-                {busyAction !== "approve" && <Icon name="arrow" size={17} />}
-              </button>
-            </div>
+            {selectedView.persisted ? (
+              <div className="approval-actions">
+                <button
+                  className="button button-danger"
+                  disabled={Boolean(busyAction)}
+                  onClick={() => act("reject")}
+                  type="button"
+                >
+                  {busyAction === "reject" ? "거절하는 중..." : "이 추천 거절"}
+                </button>
+                <button
+                  className="button button-secondary"
+                  disabled={Boolean(busyAction)}
+                  onClick={showNextComparison}
+                  type="button"
+                >
+                  {busyAction === "alternatives" ? "찾는 중..." : "다른 방법 보기"}
+                </button>
+                <button
+                  className="button button-primary"
+                  data-testid="recommendation-approve"
+                  disabled={
+                    Boolean(busyAction) || !isValid || Boolean(shift?.detected)
+                  }
+                  onClick={() => act("approve")}
+                  type="button"
+                >
+                  {busyAction === "approve" ? "승인하는 중..." : "가상 적용 승인"}
+                  {busyAction !== "approve" && <Icon name="arrow" size={17} />}
+                </button>
+              </div>
+            ) : (
+              <div className="comparison-readonly">
+                <SubmitNotice kind="info">
+                  이 후보는 비교용 결과입니다. 승인·거절은 저장된 우선 추천안에서만
+                  할 수 있습니다.
+                </SubmitNotice>
+                <button
+                  className="button button-secondary"
+                  onClick={() => setSelectedKey(views[0].key)}
+                  type="button"
+                >
+                  우선 추천으로 돌아가기
+                </button>
+              </div>
+            )}
           </section>
         </div>
       </div>

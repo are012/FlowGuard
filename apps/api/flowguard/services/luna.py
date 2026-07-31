@@ -15,6 +15,7 @@ from flowguard.storage import FlowGuardRepository
 from .agent_trace import build_decision_trace
 from .errors import ServiceError
 from .investigator import (
+    MAX_EVALUATED_CANDIDATES,
     MAX_EXPOSED_ALTERNATIVES,
     MAX_TOOL_CALLS,
     ActionCandidateService,
@@ -159,6 +160,7 @@ class LunaLiquidityInvestigator:
         evaluated: dict[str, dict[str, Any]] = {}
         gathered_evidence: list[dict[str, Any]] = []
         evidence_gaps: list[dict[str, Any]] = []
+        counterparty_evidence_cache: dict[str, dict[str, Any]] = {}
         usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         def call(
@@ -177,14 +179,14 @@ class LunaLiquidityInvestigator:
             core_call_count += 1
             try:
                 output = function()
-            except ServiceError as exc:
+            except Exception as exc:
                 self.repository.record_tool_execution(
                     analysis_id=analysis_id,
                     agent_run_id=agent_run_id,
                     sequence=core_call_count,
                     tool_name=tool_name,
                     input_payload=payload,
-                    error=exc.to_dict(),
+                    error=LiquidityInvestigator._tool_error(exc),
                 )
                 raise
             self.repository.record_tool_execution(
@@ -232,6 +234,8 @@ class LunaLiquidityInvestigator:
                 return get_context()
             if name == "get_counterparty_evidence":
                 counterparty_id = str(arguments["counterparty_id"])
+                if counterparty_id in counterparty_evidence_cache:
+                    return counterparty_evidence_cache[counterparty_id]
                 try:
                     evidence = call(
                         "get_counterparty_evidence",
@@ -239,9 +243,7 @@ class LunaLiquidityInvestigator:
                             "snapshot_id": snapshot_id,
                             "counterparty_id": counterparty_id,
                         },
-                        lambda: self.tools.get_counterparty_evidence(
-                            snapshot_id, counterparty_id
-                        ),
+                        lambda: self.tools.get_counterparty_evidence(snapshot_id, counterparty_id),
                     )
                 except ServiceError as exc:
                     if exc.code != "INSUFFICIENT_DATA":
@@ -252,8 +254,11 @@ class LunaLiquidityInvestigator:
                         "requires_verification": True,
                     }
                     evidence_gaps.append(gap)
-                    return {"error": gap}
+                    result = {"error": gap}
+                    counterparty_evidence_cache[counterparty_id] = result
+                    return result
                 gathered_evidence.append(evidence)
+                counterparty_evidence_cache[counterparty_id] = evidence
                 return evidence
             if name == "query_financial_events":
                 date_from = date.fromisoformat(str(arguments["date_from"]))
@@ -282,6 +287,14 @@ class LunaLiquidityInvestigator:
                 if candidate is None:
                     return {"error": "UNKNOWN_CANDIDATE", "candidate_id": candidate_id}
                 if candidate_id not in evaluated:
+                    if (
+                        len(evaluated) >= MAX_EVALUATED_CANDIDATES
+                        or core_call_count > MAX_TOOL_CALLS - 2
+                    ):
+                        return {
+                            "error": "EVALUATION_BUDGET_EXHAUSTED",
+                            "max_evaluated_candidates": MAX_EVALUATED_CANDIDATES,
+                        }
                     evaluated[candidate_id] = self.action_service.evaluate(
                         snapshot_id,
                         [candidate],
@@ -355,8 +368,6 @@ class LunaLiquidityInvestigator:
             decision,
             candidates=candidates,
             evaluated=evaluated,
-            snapshot_id=snapshot_id,
-            call=call,
         )
         safe_candidates = [item for item in evaluated.values() if item.get("feasible") is True]
         alternatives = self._safe_alternatives(
@@ -424,19 +435,15 @@ class LunaLiquidityInvestigator:
         *,
         candidates: dict[str, dict[str, Any]],
         evaluated: dict[str, dict[str, Any]],
-        snapshot_id: str,
-        call: Any,
     ) -> dict[str, Any] | None:
         selected_id = decision.selected_candidate_id
         if selected_id is None:
             return None
-        candidate = candidates.get(selected_id)
-        if candidate is not None and selected_id not in evaluated:
-            evaluated[selected_id] = self.action_service.evaluate(
-                snapshot_id,
-                [candidate],
-                call,
-            )[0]
+        if selected_id not in candidates:
+            return next(
+                (item for item in evaluated.values() if item.get("feasible") is True),
+                None,
+            )
         selected = evaluated.get(selected_id)
         if selected and selected.get("feasible") is True:
             return selected

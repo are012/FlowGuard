@@ -14,6 +14,7 @@ from .tools import CoreToolService
 
 MAX_TOOL_CALLS = 10
 MAX_CANDIDATE_PLANS = 5
+MAX_EVALUATED_CANDIDATES = 3
 MAX_EXPOSED_ALTERNATIVES = 2
 
 
@@ -75,10 +76,12 @@ class RiskEvidenceBuilder:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         evidence: list[dict[str, Any]] = []
         evidence_gaps: list[dict[str, Any]] = []
+        seen_counterparty_ids: set[str] = set()
         for receivable in context.get("receivables", [])[:2]:
             counterparty_id = receivable.get("counterparty_id")
-            if not counterparty_id:
+            if not counterparty_id or counterparty_id in seen_counterparty_ids:
                 continue
+            seen_counterparty_ids.add(counterparty_id)
             try:
                 evidence.append(
                     call(
@@ -143,7 +146,7 @@ class ActionCandidateService:
             ]
             if payment_account is None:
                 return []
-            return [
+            candidates = [
                 {
                     "action_id": f"action-{uuid4()}",
                     "id": f"action-{uuid4()}",
@@ -166,12 +169,52 @@ class ActionCandidateService:
                     "assumptions": [
                         "amount는 baseline_result.risk_metrics.expected_gap_max에서 가져왔습니다."
                     ],
-                    "source_evidence_ids": list(
-                        context.get("data_quality", {}).get("unconfirmed_items", [])
-                    ),
+                    "source_evidence_ids": [
+                        source["account_id"],
+                        payment_account["account_id"],
+                    ],
                 }
                 for source in sources
             ]
+            blocked_sources = [
+                account
+                for account in context.get("accounts", [])
+                if not account.get("is_payment_account")
+                and account not in sources
+                and account.get("balance", 0) > 0
+            ]
+            if blocked_sources:
+                source = blocked_sources[0]
+                candidates.append(
+                    {
+                        "action_id": f"action-{uuid4()}",
+                        "id": f"action-{uuid4()}",
+                        "type": "TRANSFER",
+                        "amount": gap,
+                        "feasible": False,
+                        "riskResolved": False,
+                        "actions": [
+                            {
+                                "type": "transfer",
+                                "parameters": {
+                                    "from_account_id": source["account_id"],
+                                    "to_account_id": payment_account["account_id"],
+                                    "amount": gap,
+                                    "execution_date": min(parsed_risk_date, as_of).isoformat(),
+                                },
+                            }
+                        ],
+                        "requires_user_approval": True,
+                        "assumptions": [
+                            "사용 불가 또는 보호 자금 계좌를 비교한 뒤 정책 검증으로 제외합니다."
+                        ],
+                        "source_evidence_ids": [
+                            source["account_id"],
+                            payment_account["account_id"],
+                        ],
+                    }
+                )
+            return candidates[:MAX_CANDIDATE_PLANS]
 
         savings = [
             event
@@ -382,14 +425,14 @@ class LiquidityInvestigator:
             sequence += 1
             try:
                 output = function()
-            except ServiceError as exc:
+            except Exception as exc:
                 self.repository.record_tool_execution(
                     analysis_id=analysis_id,
                     agent_run_id=agent_run_id,
                     sequence=sequence,
                     tool_name=tool_name,
                     input_payload=payload,
-                    error=exc.to_dict(),
+                    error=self._tool_error(exc),
                 )
                 raise
             self.repository.record_tool_execution(
@@ -429,7 +472,11 @@ class LiquidityInvestigator:
             state["tool_calls"] = self.repository.list_tool_executions(analysis_id, agent_run_id)
             return state
 
-        evaluated_candidates = self.action_service.evaluate(snapshot_id, action_candidates, call)
+        evaluated_candidates = self.action_service.evaluate(
+            snapshot_id,
+            action_candidates[:MAX_EVALUATED_CANDIDATES],
+            call,
+        )
         state["candidate_plans"] = action_candidates
         state["evaluated_plans"] = [
             {
@@ -456,6 +503,17 @@ class LiquidityInvestigator:
         return state
 
     @staticmethod
+    def _tool_error(exception: Exception) -> dict[str, Any]:
+        if isinstance(exception, ServiceError):
+            return exception.to_dict()
+        return {
+            "code": "TOOL_EXECUTION_FAILED",
+            "message": "금융 도구 실행 중 예상하지 못한 오류가 발생했습니다.",
+            "details": {"exception_type": type(exception).__name__},
+            "retryable": False,
+        }
+
+    @staticmethod
     def _hypotheses(shortfall_type: str, metrics: dict[str, Any]) -> list[dict[str, Any]]:
         if shortfall_type == "PAYMENT_ACCOUNT":
             summary = "전체 자금보다 결제계좌 배치가 주요 위험 원인일 수 있습니다."
@@ -477,6 +535,7 @@ __all__ = [
     "ActionCandidateService",
     "LiquidityInvestigator",
     "MAX_CANDIDATE_PLANS",
+    "MAX_EVALUATED_CANDIDATES",
     "MAX_EXPOSED_ALTERNATIVES",
     "MAX_TOOL_CALLS",
 ]

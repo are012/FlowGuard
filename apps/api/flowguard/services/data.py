@@ -158,46 +158,61 @@ class DataService:
         decision: str,
         details: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized_decision = decision.upper()
-        if normalized_decision not in {"CONFIRMED", "REJECTED", "UNKNOWN"}:
-            raise ServiceError(
-                "INVALID_FINANCIAL_EVENT",
-                "후보 확인값은 CONFIRMED, REJECTED, UNKNOWN 중 하나여야 합니다.",
-                details={"decision": decision},
-                http_status=422,
-            )
-        candidate = self.get_record(user_id, "candidates", candidate_id)
-        if normalized_decision != "CONFIRMED":
-            return self.patch_record(
-                user_id,
-                "candidates",
-                candidate_id,
-                {"status": normalized_decision},
-            )
+        result, bundle = self._prepare_candidate_decision(
+            user_id,
+            candidate_id,
+            decision=decision,
+            details=details,
+        )
+        self.repository.apply_record_bundle(user_id, bundle)
+        return result
 
-        try:
-            promotion_kind, promoted, additional = self._promote_candidate(
-                user_id, candidate, details or {}
+    def commit_setup(
+        self,
+        user_id: str,
+        *,
+        preferences: Mapping[str, Any],
+        candidates: list[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Validate and persist all setup choices in one transaction."""
+
+        prepared_preferences = self._prepare_preferences(user_id, preferences)
+        prepared: dict[str, dict[str, dict[str, Any]]] = {
+            "preferences": {"preferences": prepared_preferences}
+        }
+        results: list[dict[str, Any]] = []
+        seen_candidate_ids: set[str] = set()
+
+        for item in candidates:
+            candidate_id = str(item["candidate_id"])
+            if candidate_id in seen_candidate_ids:
+                raise ServiceError(
+                    "INVALID_FINANCIAL_EVENT",
+                    "같은 후보를 한 번만 확정할 수 있습니다.",
+                    details={"candidate_id": candidate_id},
+                    http_status=422,
+                )
+            seen_candidate_ids.add(candidate_id)
+            result, bundle = self._prepare_candidate_decision(
+                user_id,
+                candidate_id,
+                decision=str(item["decision"]),
+                details=item.get("details"),
             )
-        except ValidationError as exc:
-            raise ServiceError(
-                "CANDIDATE_CONFIRMATION_NEEDS_DETAILS",
-                "후보 확정 정보가 올바르지 않습니다.",
-                details={"validation_errors": self._validation_errors(exc)},
-                http_status=422,
-            ) from exc
-        confirmed = {**candidate, "status": "CONFIRMED"}
+            results.append(result)
+            for kind, records in bundle.items():
+                id_field = CURRENT_KINDS[kind]
+                target = prepared.setdefault(kind, {})
+                for record in records:
+                    target[str(record[id_field])] = record
+
         self.repository.apply_record_bundle(
             user_id,
-            {
-                "candidates": [confirmed],
-                promotion_kind: [promoted],
-                **additional,
-            },
+            {kind: list(records.values()) for kind, records in prepared.items()},
         )
         return {
-            **confirmed,
-            "promotion": {"kind": promotion_kind, "record": promoted},
+            "preferences": prepared_preferences,
+            "candidates": results,
         }
 
     def get_preferences(self, user_id: str) -> dict[str, Any]:
@@ -212,6 +227,15 @@ class DataService:
         }
 
     def update_preferences(self, user_id: str, changes: Mapping[str, Any]) -> dict[str, Any]:
+        updated = self._prepare_preferences(user_id, changes)
+        self.repository.upsert_records(user_id, "preferences", [updated])
+        return self.get_preferences(user_id)
+
+    def _prepare_preferences(
+        self,
+        user_id: str,
+        changes: Mapping[str, Any],
+    ) -> dict[str, Any]:
         unknown = set(changes) - {
             "protection_level",
             "minimum_total_reserve",
@@ -240,8 +264,49 @@ class DataService:
                 details={"validation_errors": self._validation_errors(exc)},
                 http_status=422,
             ) from exc
-        self.repository.upsert_records(user_id, "preferences", [updated])
-        return self.get_preferences(user_id)
+        return updated
+
+    def _prepare_candidate_decision(
+        self,
+        user_id: str,
+        candidate_id: str,
+        *,
+        decision: str,
+        details: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
+        normalized_decision = decision.upper()
+        if normalized_decision not in {"CONFIRMED", "REJECTED", "UNKNOWN"}:
+            raise ServiceError(
+                "INVALID_FINANCIAL_EVENT",
+                "후보 확인값은 CONFIRMED, REJECTED, UNKNOWN 중 하나여야 합니다.",
+                details={"decision": decision},
+                http_status=422,
+            )
+        candidate = self.get_record(user_id, "candidates", candidate_id)
+        decided = {**candidate, "status": normalized_decision}
+        if normalized_decision != "CONFIRMED":
+            return decided, {"candidates": [decided]}
+
+        try:
+            promotion_kind, promoted, additional = self._promote_candidate(
+                user_id, candidate, details or {}
+            )
+        except ValidationError as exc:
+            raise ServiceError(
+                "CANDIDATE_CONFIRMATION_NEEDS_DETAILS",
+                "후보 확정 정보가 올바르지 않습니다.",
+                details={"validation_errors": self._validation_errors(exc)},
+                http_status=422,
+            ) from exc
+        bundle = {
+            "candidates": [decided],
+            promotion_kind: [promoted],
+            **additional,
+        }
+        return {
+            **decided,
+            "promotion": {"kind": promotion_kind, "record": promoted},
+        }, bundle
 
     def _promote_candidate(
         self,

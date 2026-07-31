@@ -11,6 +11,7 @@ import {
   LoadingState,
   PageIntro,
   StatusPill,
+  SubmitNotice,
 } from "@/components/ui";
 import { ApiError, useRemote } from "@/lib/api";
 import {
@@ -140,6 +141,15 @@ export default function DashboardPage() {
           </Link>
         }
       />
+
+      {data.analysis_required && (
+        <SubmitNotice kind="info">
+          금융정보가 최근 분석 이후 변경되었습니다.{" "}
+          <Link className="inline-link" href="/setup">
+            데이터를 다시 확인하고 분석하기
+          </Link>
+        </SubmitNotice>
+      )}
 
       <section className="dashboard-grid" aria-label="오늘의 핵심 분석">
         <article className="safe-card">

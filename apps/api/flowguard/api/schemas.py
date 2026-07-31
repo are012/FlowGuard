@@ -44,19 +44,28 @@ class FactsPayload(StrictRequest):
 
 class AIToBackendResponse(StrictRequest):
     schemaVersion: Literal["1.0"] = "1.0"
-    analysisId: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
-    riskExplanation: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    analysisId: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+    riskExplanation: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+    ]
     rankedActions: list[AIActionCandidateRef] = Field(default_factory=list)
-    userMessage: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    userMessage: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+    ]
 
 
 class BackendToAIRequest(StrictRequest):
     schemaVersion: Literal["1.0"] = "1.0"
-    analysisId: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    analysisId: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
     calculatedAt: AwareDatetime
     facts: FactsPayload
     evidence: list[dict] = Field(default_factory=list)
     actionCandidates: list[dict] = Field(default_factory=list)
+
 
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 NonNegativeWon = Annotated[int, Field(strict=True, ge=0)]
@@ -198,6 +207,10 @@ class CandidateDecision(StrictRequest):
     details: dict | None = None
 
 
+class CandidateCommitDecision(CandidateDecision):
+    candidate_id: Identifier
+
+
 class UserPreferencesRequest(StrictRequest):
     protection_level: Annotated[float, Field(strict=True, ge=0, le=1)] | None = None
     minimum_total_reserve: NonNegativeWon | None = None
@@ -210,6 +223,15 @@ class UserPreferencesRequest(StrictRequest):
         if not self.model_fields_set:
             raise ValueError("at least one preference is required")
         return self
+
+
+class SetupCommitRequest(StrictRequest):
+    preferences: UserPreferencesRequest
+    candidates: list[CandidateCommitDecision] = Field(default_factory=list)
+
+
+class DemoResetRequest(StrictRequest):
+    confirmation: Literal["RESET_DEMO"]
 
 
 class AnalysisRequest(StrictRequest):

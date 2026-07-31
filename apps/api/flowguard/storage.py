@@ -421,6 +421,33 @@ class FlowGuardRepository:
             )
         return len(payloads)
 
+    def reset_user_data(self, user_id: str) -> None:
+        """Delete one user's demo state and analysis artifacts atomically."""
+
+        with self._session() as session:
+            analysis_ids = list(
+                session.scalars(
+                    select(AnalysisRunRow.analysis_id).where(AnalysisRunRow.user_id == user_id)
+                )
+            )
+            session.execute(delete(ApprovalAuditRow).where(ApprovalAuditRow.user_id == user_id))
+            session.execute(delete(RecommendationRow).where(RecommendationRow.user_id == user_id))
+            session.execute(delete(AnalysisReportRow).where(AnalysisReportRow.user_id == user_id))
+            if analysis_ids:
+                session.execute(
+                    delete(ToolExecutionRow).where(ToolExecutionRow.analysis_id.in_(analysis_ids))
+                )
+                session.execute(
+                    delete(AnalysisEventRow).where(AnalysisEventRow.analysis_id.in_(analysis_ids))
+                )
+                session.execute(
+                    delete(AnalysisRunRow).where(AnalysisRunRow.analysis_id.in_(analysis_ids))
+                )
+            session.execute(
+                delete(FinancialSnapshotRow).where(FinancialSnapshotRow.user_id == user_id)
+            )
+            session.execute(delete(CurrentRecordRow).where(CurrentRecordRow.user_id == user_id))
+
     def list_records(self, user_id: str, kind: str) -> list[dict[str, Any]]:
         self._id_field(kind)
         with self._session() as session:

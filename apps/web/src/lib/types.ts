@@ -64,9 +64,36 @@ export interface EvaluationState {
   risk_metrics?: RiskMetrics;
 }
 
+export interface RecommendationDerivation {
+  amount: number;
+  currency: "KRW";
+  source_field: string;
+  source_value: number;
+  formula: string;
+  evidence_ids: string[];
+  snapshot_id: string;
+  revision: string;
+  tool_version: string | null;
+  policy_version: string;
+}
+
+export interface RecommendationComparisonCandidate {
+  candidate_id: string;
+  type: string | null;
+  amount: number | null;
+  selected: boolean;
+  feasible: boolean;
+  after_expected_gap_max: number | null;
+  risk_shift: RiskShift | null;
+  policy_violations: PolicyViolation[];
+  rejection_reason: string | null;
+}
+
 export interface Recommendation {
   recommendation_id?: string;
   id?: string;
+  snapshot_id?: string;
+  current_state_revision?: string;
   title?: string;
   summary?: string;
   rationale?: string;
@@ -83,6 +110,7 @@ export interface Recommendation {
     after?: EvaluationState;
     risk_shift?: RiskShift;
     policy_violations?: PolicyViolation[];
+    tool_version?: string;
   };
   risk_shift?: RiskShift;
   policy_violations?: PolicyViolation[];
@@ -93,6 +121,9 @@ export interface Recommendation {
     policy_version?: string;
   };
   requires_user_approval?: boolean;
+  alternatives?: Recommendation[];
+  derivation?: RecommendationDerivation;
+  comparison_candidates?: RecommendationComparisonCandidate[];
 }
 
 export interface PolicyViolation {
@@ -132,6 +163,9 @@ export interface DashboardResponse {
   analysis_run_id?: string;
   snapshot_id?: string;
   as_of?: string;
+  revision?: string;
+  analysis_revision?: string;
+  analysis_required?: boolean;
   analysis_status?: string;
   is_virtual?: boolean;
   safe_to_spend?: SafeToSpend | number | null;
@@ -296,6 +330,10 @@ export interface ImportCandidate {
 }
 
 export interface ImportResponse {
+  revision: string;
+  analysis_required: boolean;
+  is_demo?: boolean;
+  analysis_as_of?: string;
   import_id?: string;
   imported_count?: number;
   imported_counts?: Record<string, number>;
@@ -311,6 +349,9 @@ export interface ImportResponse {
 export interface AnalysisResponse {
   analysis_id?: string;
   analysis_run_id?: string;
+  revision?: string;
+  analysis_revision?: string;
+  analysis_required?: boolean;
   status?: string;
   analysis_status?: string;
   before?: EvaluationState;
@@ -318,6 +359,19 @@ export interface AnalysisResponse {
   risk_shift?: RiskShift;
   presentation?: RiskPresentation;
   recommendation?: Recommendation;
+}
+
+export interface SetupCommitResponse {
+  preferences: Record<string, unknown>;
+  candidates: ImportCandidate[];
+  revision: string;
+  analysis_required: boolean;
+}
+
+export interface DemoResetResponse {
+  reset: boolean;
+  revision: string;
+  analysis_required: false;
 }
 
 export interface ActionEvaluation {

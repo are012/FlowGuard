@@ -62,9 +62,7 @@ def build_decision_trace(
                 str(item)
                 for hypothesis in hypotheses
                 for item in (
-                    hypothesis.get("triggering_event_ids")
-                    or hypothesis.get("evidence_ids")
-                    or []
+                    hypothesis.get("triggering_event_ids") or hypothesis.get("evidence_ids") or []
                 )
             ],
         )
