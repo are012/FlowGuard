@@ -81,12 +81,22 @@ make dev-web
 
 Open `http://localhost:3000`, download the explicit sample CSV from the setup
 screen, and upload it. Until data is imported, the UI shows a real empty state;
-it does not substitute demo analysis results.
+it does not substitute demo analysis results. The bundled sample is analyzed at
+the fixed scenario time `2026-07-24T09:00:00+09:00`, so the contest walkthrough
+remains reproducible. The setup screen can reset only the current demo user's
+local data and analysis artifacts.
 
 ## Validate
 
 ```bash
 make check
+```
+
+The browser walkthrough can be verified separately after activating the Python
+virtual environment:
+
+```bash
+npm --prefix apps/web run test:e2e
 ```
 
 The API uses `http://localhost:8000` by default. Override the web client URL with

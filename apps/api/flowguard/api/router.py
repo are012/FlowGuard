@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
+from flowguard.config import DEMO_ANALYSIS_AS_OF
 from flowguard.services.analysis import AnalysisOrchestrator
 from flowguard.services.data import DataService
 from flowguard.services.recommendations import RecommendationService
@@ -30,12 +31,14 @@ from .schemas import (
     CandidateDecision,
     CounterpartyCreate,
     CounterpartyPatch,
+    DemoResetRequest,
     InstallmentPrecheckRequest,
     ReceivableCreate,
     ReceivablePatch,
     RecommendationDecision,
     ScheduledEventCreate,
     ScheduledEventPatch,
+    SetupCommitRequest,
     TransactionPatch,
     UserPreferencesRequest,
     dumped,
@@ -66,6 +69,7 @@ async def import_transactions(
     protection_level: Annotated[float | None, Form(ge=0, le=1)] = None,
     minimum_total_reserve: Annotated[int | None, Form(ge=0)] = None,
     income_type: Annotated[str | None, Form(max_length=100)] = None,
+    demo_mode: Annotated[bool, Form()] = False,
 ) -> dict[str, Any]:
     content = await file.read()
     max_bytes = int(os.getenv("FLOWGUARD_MAX_CSV_BYTES", str(5 * 1024 * 1024)))
@@ -92,6 +96,9 @@ async def import_transactions(
         imported["preferences"] = data.update_preferences(user_id, preference_changes)
     imported["revision"] = analyses.repository.current_state_revision(user_id)
     imported["analysis_required"] = True
+    imported["is_demo"] = demo_mode
+    if demo_mode:
+        imported["analysis_as_of"] = DEMO_ANALYSIS_AS_OF
     return imported
 
 
@@ -292,6 +299,40 @@ def update_preferences(
         user_id,
         analyses,
     )
+
+
+@api.post("/setup/commit")
+def commit_setup(
+    body: SetupCommitRequest,
+    user_id: UserId,
+    data: Data,
+    analyses: Analyses,
+) -> dict[str, Any]:
+    committed = data.commit_setup(
+        user_id,
+        preferences=dumped(body.preferences),
+        candidates=[dumped(candidate) for candidate in body.candidates],
+    )
+    return {
+        **committed,
+        "revision": analyses.repository.current_state_revision(user_id),
+        "analysis_required": True,
+    }
+
+
+@api.post("/demo/reset")
+def reset_demo(
+    body: DemoResetRequest,
+    user_id: UserId,
+    repository: Repository,
+) -> dict[str, Any]:
+    del body
+    repository.reset_user_data(user_id)
+    return {
+        "reset": True,
+        "revision": repository.current_state_revision(user_id),
+        "analysis_required": False,
+    }
 
 
 @api.get("/receivables")

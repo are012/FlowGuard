@@ -68,6 +68,7 @@ class AnalysisOrchestrator:
         trigger_type: str = "MANUAL",
         as_of: datetime | None = None,
     ) -> dict[str, Any]:
+        analysis_revision: str | None = None
         run = self.repository.create_analysis(
             user_id,
             trigger_type=trigger_type,
@@ -79,7 +80,8 @@ class AnalysisOrchestrator:
             snapshot, current_state_revision = self.snapshot_builder.build_with_revision(
                 user_id, as_of=as_of
             )
-            return self._analyze_snapshot(
+            analysis_revision = current_state_revision
+            result = self._analyze_snapshot(
                 analysis_id=analysis_id,
                 user_id=user_id,
                 snapshot=snapshot,
@@ -88,9 +90,14 @@ class AnalysisOrchestrator:
                 current_state_revision=current_state_revision,
             )
         except ServiceError as exc:
-            return self._fail(analysis_id, exc)
+            result = self._fail(analysis_id, exc)
         except Exception as exc:
-            return self._fail_unexpected(analysis_id, exc)
+            result = self._fail_unexpected(analysis_id, exc)
+        return self._with_revision_contract(
+            user_id,
+            result,
+            analysis_revision=analysis_revision,
+        )
 
     def run_virtual(
         self,
@@ -214,6 +221,12 @@ class AnalysisOrchestrator:
         presentation = jsonable(map_risk_presentation(analysis_model))
         recommendations: list[dict[str, Any]] = []
         if agent_state["recommended_plan"] is not None:
+            derivation, comparison_candidates = self._recommendation_explanation(
+                agent_state=agent_state,
+                baseline=baseline,
+                snapshot=snapshot,
+                current_state_revision=current_state_revision,
+            )
             recommendations.append(
                 self.repository.save_recommendation(
                     analysis_id=analysis_id,
@@ -223,6 +236,8 @@ class AnalysisOrchestrator:
                         "snapshot_id": snapshot.snapshot_id,
                         "current_state_revision": current_state_revision,
                         "virtual_only": True,
+                        "derivation": derivation,
+                        "comparison_candidates": comparison_candidates,
                     },
                 )
             )
@@ -281,6 +296,129 @@ class AnalysisOrchestrator:
                 "base_snapshot_id": base_snapshot_id,
             },
         )
+
+    def _with_revision_contract(
+        self,
+        user_id: str,
+        analysis: dict[str, Any],
+        *,
+        analysis_revision: str | None,
+    ) -> dict[str, Any]:
+        revision = self.repository.current_state_revision(user_id)
+        return {
+            **analysis,
+            "revision": revision,
+            "analysis_revision": analysis_revision,
+            "analysis_required": (
+                analysis.get("status") != "COMPLETED"
+                or analysis_revision is None
+                or analysis_revision != revision
+            ),
+        }
+
+    @staticmethod
+    def _recommendation_explanation(
+        *,
+        agent_state: dict[str, Any],
+        baseline: dict[str, Any],
+        snapshot: FinancialSnapshot,
+        current_state_revision: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        recommendation = agent_state["recommended_plan"]
+        selected_id = str(recommendation.get("action_id") or recommendation.get("id"))
+        metrics = baseline["risk_metrics"]
+        recommendation_type = recommendation.get("type")
+        recommendation_amount = recommendation.get("amount")
+        if not isinstance(recommendation_amount, int):
+            recommendation_amount = metrics["expected_gap_max"]
+        amount_comes_from_event = recommendation_type == "DELAY_PURCHASE"
+        evidence_ids = [
+            *metrics.get("triggering_event_ids", []),
+            *recommendation.get("source_evidence_ids", []),
+        ]
+        derivation = {
+            "amount": recommendation_amount,
+            "currency": "KRW",
+            "source_field": (
+                "scheduled_events[].amount"
+                if amount_comes_from_event
+                else "risk_metrics.expected_gap_max"
+            ),
+            "source_value": recommendation_amount,
+            "formula": (
+                "조정 가능한 구매 예정 금액을 사용합니다."
+                if amount_comes_from_event
+                else "예상 최대 부족액만큼 결제 재원을 보충합니다."
+            ),
+            "evidence_ids": list(dict.fromkeys(str(item) for item in evidence_ids)),
+            "snapshot_id": snapshot.snapshot_id,
+            "revision": current_state_revision,
+            "tool_version": baseline.get("tool_version"),
+            "policy_version": POLICY_VERSION,
+        }
+        comparison_candidates = [
+            AnalysisOrchestrator._comparison_candidate(
+                candidate,
+                selected_id=selected_id,
+            )
+            for candidate in agent_state.get("actionCandidates", [])
+        ]
+        return derivation, comparison_candidates
+
+    @staticmethod
+    def _comparison_candidate(
+        candidate: dict[str, Any],
+        *,
+        selected_id: str,
+    ) -> dict[str, Any]:
+        evaluation = candidate.get("evaluation") or {}
+        policy = candidate.get("policy_result") or {}
+        risk_shift = evaluation.get("risk_shift")
+        raw_violations = [
+            *evaluation.get("policy_violations", []),
+            *policy.get("violations", []),
+        ]
+        policy_violations: list[dict[str, Any]] = []
+        seen_violations: set[tuple[Any, Any, Any]] = set()
+        for violation in raw_violations:
+            identity = (
+                violation.get("code"),
+                violation.get("message"),
+                violation.get("action_id"),
+            )
+            if identity in seen_violations:
+                continue
+            seen_violations.add(identity)
+            policy_violations.append(violation)
+        feasible = candidate.get("feasible") is True
+        rejection_reason = None
+        if not feasible:
+            if policy_violations:
+                rejection_reason = str(
+                    policy_violations[0].get("message") or policy_violations[0].get("code")
+                )
+            elif isinstance(risk_shift, dict) and risk_shift.get("detected"):
+                reasons = risk_shift.get("reasons") or []
+                rejection_reason = (
+                    ", ".join(str(reason) for reason in reasons)
+                    or "이후 기간에 새로운 위험이 발생합니다."
+                )
+            else:
+                rejection_reason = "가상 적용 또는 금융 안전정책 검증을 통과하지 못했습니다."
+        candidate_id = str(candidate.get("action_id") or candidate.get("id"))
+        return {
+            "candidate_id": candidate_id,
+            "type": candidate.get("type"),
+            "amount": candidate.get("amount"),
+            "selected": candidate_id == selected_id,
+            "feasible": feasible,
+            "after_expected_gap_max": (
+                evaluation.get("after", {}).get("risk_metrics", {}).get("expected_gap_max")
+            ),
+            "risk_shift": risk_shift,
+            "policy_violations": policy_violations,
+            "rejection_reason": rejection_reason,
+        }
 
     def _interpret_analysis(self, analysis_id: str, report: dict[str, Any]) -> dict[str, Any]:
         payload = self._build_ai_request_payload(report)

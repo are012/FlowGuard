@@ -58,17 +58,6 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         assert analysis.status_code == 201
         assert analysis.json()["status"] == "COMPLETED"
 
-        analysis = client.post(
-            "/api/v1/analyses",
-            headers=headers,
-            json={
-                "trigger_type": "DATA_REFRESH",
-                "as_of": "2026-07-24T09:00:00+09:00",
-            },
-        )
-        assert analysis.status_code == 201
-        assert analysis.json()["status"] == "COMPLETED"
-
         dashboard = client.get("/api/v1/dashboard", headers=headers)
         assert dashboard.status_code == 200
         dashboard_payload = dashboard.json()
@@ -76,6 +65,15 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         assert dashboard_payload["risk_metrics"]["shortfall_type"] == "PAYMENT_ACCOUNT"
         assert dashboard_payload["risk_metrics"]["expected_gap_max"] == 250_000
         assert dashboard_payload["recommendation"]["actions"][0]["type"] == "transfer"
+        comparison = dashboard_payload["recommendation"]["comparison_candidates"]
+        assert len(comparison) >= 2
+        assert any(item["selected"] for item in comparison)
+        assert any(not item["feasible"] for item in comparison)
+        tool_calls = client.get("/api/v1/reports/latest", headers=headers).json()["agent"][
+            "tool_calls"
+        ]
+        assert len(tool_calls) <= 10
+        assert [item["sequence"] for item in tool_calls] == list(range(1, len(tool_calls) + 1))
 
         receivables = client.get("/api/v1/receivables", headers=headers).json()
         assert receivables[0]["counterparty_name"] == "콘텐츠랩B"

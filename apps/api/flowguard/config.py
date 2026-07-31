@@ -13,6 +13,7 @@ RISK_RULE_VERSION = "risk-presentation-rules-v1"
 ANALYSIS_HORIZON_DAYS = 91
 DEFAULT_SIMULATION_SEED = 42
 DEFAULT_PROTECTION_LEVEL = 0.90
+DEMO_ANALYSIS_AS_OF = "2026-07-24T09:00:00+09:00"
 
 # SPECIFICATION.md section 27 leaves these values open. They are explicit and versioned here
 # so identical inputs remain reproducible until a future version deliberately changes them.

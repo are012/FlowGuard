@@ -6,19 +6,29 @@ import { useMemo, useRef, useState } from "react";
 import { Icon } from "@/components/icons";
 import { PageIntro, SubmitNotice } from "@/components/ui";
 import { apiRequest, listFrom, useRemote } from "@/lib/api";
-import { candidateTypeLabel, formatPercent, formatWon } from "@/lib/format";
+import {
+  candidateTypeLabel,
+  formatDate,
+  formatPercent,
+  formatWon,
+} from "@/lib/format";
 import type {
   Account,
   AnalysisResponse,
   Card,
   Counterparty,
+  DemoResetResponse,
   ImportCandidate,
   ImportResponse,
+  SetupCommitResponse,
 } from "@/lib/types";
 
 type ReviewValue = "CONFIRMED" | "REJECTED" | "UNKNOWN";
 type CandidateDetails = Record<string, string>;
 type ListResponse<T> = T[] | { items?: T[] } | { data?: T[] };
+
+const SAMPLE_FILE_NAME = "flowguard-synthetic-transactions.csv";
+const SAMPLE_ANALYSIS_AS_OF = "2026-07-24T09:00:00+09:00";
 
 const promotionFields: Record<
   string,
@@ -113,6 +123,7 @@ export default function SetupPage() {
   const [analysisResult, setAnalysisResult] = useState<AnalysisResponse>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
   const accountsRemote =
     useRemote<ListResponse<Account>>("/api/v1/accounts");
   const cardsRemote = useRemote<ListResponse<Card>>("/api/v1/cards");
@@ -242,6 +253,7 @@ export default function SetupPage() {
 
     setBusy(true);
     setError(undefined);
+    setNotice(undefined);
     setImportResult(undefined);
     setAnalysisResult(undefined);
     setReviews({});
@@ -249,8 +261,9 @@ export default function SetupPage() {
 
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("income_type", incomeType);
-    if (minimumReserve) formData.append("minimum_total_reserve", minimumReserve);
+    if (file.name === SAMPLE_FILE_NAME) {
+      formData.append("demo_mode", "true");
+    }
 
     try {
       const response = await apiRequest<ImportResponse>(
@@ -298,58 +311,57 @@ export default function SetupPage() {
 
     setBusy(true);
     setError(undefined);
+    setNotice(undefined);
 
     try {
-      const preferenceResponse = await apiRequest<{
-        analysis?: AnalysisResponse;
-      }>("/api/v1/preferences", {
-        method: "PATCH",
-        body: JSON.stringify({
-          income_type: incomeType,
-          minimum_total_reserve: minimumReserve ? Number(minimumReserve) : 0,
-        }),
-      });
-      let latestCompletedAnalysis =
-        preferenceResponse.analysis?.status === "COMPLETED" ||
-        preferenceResponse.analysis?.analysis_status === "COMPLETED"
-          ? preferenceResponse.analysis
-          : undefined;
-
-      const patchable = confirmations.filter(
-        (confirmation) => confirmation.candidate_id,
+      const committed = await apiRequest<SetupCommitResponse>(
+        "/api/v1/setup/commit",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            preferences: {
+              income_type: incomeType,
+              minimum_total_reserve: minimumReserve ? Number(minimumReserve) : 0,
+            },
+            candidates: confirmations
+              .filter(
+                (
+                  confirmation,
+                ): confirmation is typeof confirmation & { candidate_id: string } =>
+                  Boolean(confirmation.candidate_id),
+              )
+              .map((confirmation) => ({
+                candidate_id: confirmation.candidate_id,
+                decision: confirmation.decision,
+                ...(confirmation.decision === "CONFIRMED" &&
+                Object.keys(confirmation.details).length
+                  ? { details: confirmation.details }
+                  : {}),
+              })),
+          }),
+        },
       );
-      for (const confirmation of patchable) {
-        const decisionResponse = await apiRequest<{
-          analysis?: AnalysisResponse;
-        }>(
-          `/api/v1/candidates/${encodeURIComponent(confirmation.candidate_id!)}`,
-          {
-            method: "PATCH",
-            body: JSON.stringify({
-              decision: confirmation.decision,
-              ...(confirmation.decision === "CONFIRMED" &&
-              Object.keys(confirmation.details).length
-                ? { details: confirmation.details }
-                : {}),
-            }),
-          },
-        );
-        if (
-          decisionResponse.analysis?.status === "COMPLETED" ||
-          decisionResponse.analysis?.analysis_status === "COMPLETED"
-        ) {
-          latestCompletedAnalysis = decisionResponse.analysis;
-        }
-      }
 
-      if (latestCompletedAnalysis) {
-        setAnalysisResult(latestCompletedAnalysis);
-      } else {
+      if (committed.analysis_required) {
+        const analysisAsOf =
+          importResult.analysis_as_of ||
+          (importResult.is_demo ? SAMPLE_ANALYSIS_AS_OF : undefined);
         const response = await apiRequest<AnalysisResponse>("/api/v1/analyses", {
           method: "POST",
-          body: JSON.stringify({ trigger_type: "DATA_REFRESH" }),
+          body: JSON.stringify({
+            trigger_type: "DATA_REFRESH",
+            ...(analysisAsOf ? { as_of: analysisAsOf } : {}),
+          }),
         });
         setAnalysisResult(response);
+      } else {
+        setAnalysisResult({
+          status: "COMPLETED",
+          analysis_status: "COMPLETED",
+          revision: committed.revision,
+          analysis_revision: committed.revision,
+          analysis_required: false,
+        });
       }
     } catch (caught) {
       setError(
@@ -362,12 +374,67 @@ export default function SetupPage() {
     }
   }
 
+  async function resetDemo() {
+    if (
+      !window.confirm(
+        "현재 사용자의 샘플 금융정보와 분석 결과를 초기화할까요? 실제 금융정보에는 영향을 주지 않습니다.",
+      )
+    ) {
+      return;
+    }
+
+    setBusy(true);
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const response = await apiRequest<DemoResetResponse>("/api/v1/demo/reset", {
+        method: "POST",
+        body: JSON.stringify({
+          confirmation: "RESET_DEMO",
+        }),
+      });
+      if (!response.reset || response.analysis_required) {
+        throw new Error("샘플 데이터 초기화 상태를 확인하지 못했습니다.");
+      }
+      setFile(undefined);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      setImportResult(undefined);
+      setAnalysisResult(undefined);
+      setReviews({});
+      setCandidateDetails({});
+      accountsRemote.reload();
+      cardsRemote.reload();
+      counterpartiesRemote.reload();
+      setNotice("샘플 데이터를 초기화했습니다. 합성 CSV를 다시 연결해 시작하세요.");
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "샘플 데이터를 초기화하지 못했습니다.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <PageIntro
         eyebrow="2분 안에 시작하기"
         title="거래내역 한 번이면 충분해요."
         description="합성 거래 CSV를 연결하면 반복 수입, 고정지출, 할부 후보를 찾아드립니다. 실제 계좌나 카드에는 연결하지 않습니다."
+        action={
+          <button
+            className="button button-secondary"
+            data-testid="demo-reset"
+            disabled={busy}
+            onClick={resetDemo}
+            type="button"
+          >
+            <Icon name="refresh" size={17} />
+            샘플 데이터 초기화
+          </button>
+        }
       />
 
       <div className="setup-layout">
@@ -448,6 +515,7 @@ export default function SetupPage() {
                   <input
                     accept=".csv,text/csv"
                     className="sr-only"
+                    data-testid="setup-file-input"
                     onChange={(event) => setFile(event.target.files?.[0])}
                     ref={fileInputRef}
                     type="file"
@@ -496,9 +564,11 @@ export default function SetupPage() {
                 </div>
 
                 {error && <SubmitNotice kind="error">{error}</SubmitNotice>}
+                {notice && <SubmitNotice kind="success">{notice}</SubmitNotice>}
                 <div className="form-actions">
                   <button
                     className="button button-primary"
+                    data-testid="setup-upload"
                     disabled={busy || !file}
                     type="submit"
                   >
@@ -549,6 +619,19 @@ export default function SetupPage() {
                   <strong>{candidates.length}건</strong>
                 </div>
               </div>
+
+              {importResult.is_demo && (
+                <SubmitNotice kind="info">
+                  합성 샘플은{" "}
+                  <strong data-testid="sample-analysis-as-of">
+                    {formatDate(
+                      importResult.analysis_as_of || SAMPLE_ANALYSIS_AS_OF,
+                      true,
+                    )}
+                  </strong>
+                  을 기준으로 분석해 언제 시연해도 같은 결과를 보여줍니다.
+                </SubmitNotice>
+              )}
 
               {candidates.length ? (
                 <div className="candidate-list">
@@ -1032,18 +1115,14 @@ export default function SetupPage() {
                   <button
                     className="button button-ghost"
                     disabled={busy}
-                    onClick={() => {
-                      setImportResult(undefined);
-                      setReviews({});
-                      setCandidateDetails({});
-                      setError(undefined);
-                    }}
+                    onClick={resetDemo}
                     type="button"
                   >
-                    다른 파일 선택
+                    서버 데이터 초기화 후 다시 선택
                   </button>
                   <button
                     className="button button-primary"
+                    data-testid="setup-analyze"
                     disabled={busy}
                     onClick={startAnalysis}
                     type="button"
@@ -1067,6 +1146,16 @@ export default function SetupPage() {
                 서버가 금융 스냅숏을 만들고 13주 현금흐름을 분석합니다. 완료 전에는
                 임의의 금액을 표시하지 않습니다.
               </p>
+              {importResult?.is_demo && (
+                <SubmitNotice kind="info">
+                  샘플 시나리오 기준일은{" "}
+                  {formatDate(
+                    importResult.analysis_as_of || SAMPLE_ANALYSIS_AS_OF,
+                    true,
+                  )}
+                  입니다.
+                </SubmitNotice>
+              )}
               <div className="analysis-request-info">
                 <span>분석 ID</span>
                 <strong>

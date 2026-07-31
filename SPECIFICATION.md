@@ -1531,6 +1531,8 @@ confirm_receivable
 
 ```text
 POST  /api/v1/imports/transactions
+POST  /api/v1/setup/commit
+POST  /api/v1/demo/reset
 GET   /api/v1/transactions
 PATCH /api/v1/transactions/{transaction_id}
 
@@ -1538,6 +1540,10 @@ GET   /api/v1/scheduled-events
 POST  /api/v1/scheduled-events
 PATCH /api/v1/scheduled-events/{event_id}
 ```
+
+`setup/commit`은 최초 설정의 환경설정과 모든 후보 결정을 한 트랜잭션으로
+저장한다. `demo/reset`은 확인 문자열을 받은 뒤 현재 데모 사용자 범위의 데이터와
+분석 산출물만 초기화한다.
 
 ## 21.2 분석
 

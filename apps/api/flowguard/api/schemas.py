@@ -207,6 +207,10 @@ class CandidateDecision(StrictRequest):
     details: dict | None = None
 
 
+class CandidateCommitDecision(CandidateDecision):
+    candidate_id: Identifier
+
+
 class UserPreferencesRequest(StrictRequest):
     protection_level: Annotated[float, Field(strict=True, ge=0, le=1)] | None = None
     minimum_total_reserve: NonNegativeWon | None = None
@@ -219,6 +223,15 @@ class UserPreferencesRequest(StrictRequest):
         if not self.model_fields_set:
             raise ValueError("at least one preference is required")
         return self
+
+
+class SetupCommitRequest(StrictRequest):
+    preferences: UserPreferencesRequest
+    candidates: list[CandidateCommitDecision] = Field(default_factory=list)
+
+
+class DemoResetRequest(StrictRequest):
+    confirmation: Literal["RESET_DEMO"]
 
 
 class AnalysisRequest(StrictRequest):

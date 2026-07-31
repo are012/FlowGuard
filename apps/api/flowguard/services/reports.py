@@ -28,11 +28,19 @@ class ReportQueryService:
                 http_status=404,
             ) from exc
         latest_run = self.repository.latest_analysis(user_id)
+        revision = self.repository.current_state_revision(user_id)
+        analysis_revision = report.get("current_state_revision")
         return {
             **report,
             "refresh_status": latest_run["status"] if latest_run else "COMPLETED",
             "analysis_status": latest_run["status"] if latest_run else "COMPLETED",
             "last_successful_analysis_at": report["created_at"],
+            "revision": revision,
+            "analysis_revision": analysis_revision,
+            "analysis_required": (
+                analysis_revision != revision
+                or (latest_run is not None and latest_run["status"] != "COMPLETED")
+            ),
         }
 
     def dashboard(self, user_id: str) -> dict[str, Any]:
@@ -63,6 +71,9 @@ class ReportQueryService:
             "refresh_status": report["refresh_status"],
             "last_successful_analysis_at": report["last_successful_analysis_at"],
             "is_virtual": report.get("is_virtual", False),
+            "revision": report["revision"],
+            "analysis_revision": report["analysis_revision"],
+            "analysis_required": report["analysis_required"],
         }
 
     def cashflow_timeline(self, user_id: str) -> dict[str, Any]:

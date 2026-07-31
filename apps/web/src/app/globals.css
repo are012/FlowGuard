@@ -2517,7 +2517,7 @@ svg {
   align-items: start;
   display: grid;
   gap: 18px;
-  grid-template-columns: 245px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
 }
 
 .recommendation-selector {
@@ -2579,6 +2579,39 @@ svg {
   color: var(--ink-muted);
   font-size: 8px;
   margin-top: 2px;
+}
+
+.candidate-comparison-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.candidate-comparison-meta > span {
+  background: var(--surface-soft);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 7px;
+  font-weight: 750;
+  padding: 3px 6px;
+}
+
+.candidate-comparison-meta > span.valid {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.candidate-comparison-meta > span.invalid {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.recommendation-selector .candidate-rejection-reason {
+  color: var(--red);
+  line-height: 1.45;
+  margin-top: 6px;
 }
 
 .recommendation-detail {
@@ -2705,6 +2738,57 @@ svg {
   font-size: 8px;
   font-weight: 800;
   margin: 0;
+}
+
+.recommendation-evidence {
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  margin-top: 24px;
+  padding: 14px 16px;
+}
+
+.recommendation-evidence summary {
+  color: var(--green-dark);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.recommendation-evidence > p {
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.65;
+  margin: 13px 0;
+}
+
+.recommendation-evidence dl {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 13px;
+}
+
+.recommendation-evidence dl > div {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 86px minmax(0, 1fr);
+}
+
+.recommendation-evidence dt,
+.recommendation-evidence dd {
+  font-size: 8px;
+  line-height: 1.5;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.recommendation-evidence dt {
+  color: var(--ink-muted);
+}
+
+.recommendation-evidence dd {
+  color: var(--ink-soft);
+  font-weight: 750;
 }
 
 .evaluation-card {
@@ -2838,6 +2922,14 @@ svg {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+  margin-top: 17px;
+}
+
+.comparison-readonly {
+  align-items: flex-end;
+  display: grid;
+  gap: 10px;
+  justify-items: end;
   margin-top: 17px;
 }
 
