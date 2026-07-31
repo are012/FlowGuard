@@ -22,6 +22,7 @@ from flowguard.storage import (
     utc_now,
 )
 
+from .agent_trace import build_decision_trace
 from .analysis_support import AIInterpretationClient
 from .errors import ServiceError
 from .investigator import LiquidityInvestigator
@@ -192,6 +193,13 @@ class AnalysisOrchestrator:
             snapshot_id=snapshot.snapshot_id,
             baseline_result=baseline,
         )
+        if "decision_trace" not in agent_state:
+            agent_state["decision_trace"] = build_decision_trace(
+                agent_state,
+                mode=getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
+                model=getattr(self.investigator, "agent_model", None),
+                fallback_reason=getattr(self.investigator, "fallback_reason", None),
+            )
         self._transition(
             analysis_id,
             "PLAN_EVALUATING",
@@ -241,6 +249,13 @@ class AnalysisOrchestrator:
                 "model_name": "flowguard-deterministic-core",
                 "model_version": baseline.get("model_version", FINANCIAL_CORE_VERSION),
                 "prompt_version": "rule-based-investigator-1",
+                "agent_mode": getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
+                "agent_model": getattr(self.investigator, "agent_model", None),
+                "agent_prompt_version": getattr(
+                    self.investigator,
+                    "prompt_version",
+                    "rule-based-investigator-1",
+                ),
                 "tool_version": baseline.get("tool_version"),
                 "policy_version": POLICY_VERSION,
                 "presentation_rule_version": RISK_RULE_VERSION,
@@ -361,8 +376,8 @@ class AnalysisOrchestrator:
             )
         return built_candidates
 
-    @staticmethod
     def _metadata(
+        self,
         *,
         is_virtual: bool,
         base_snapshot_id: str | None = None,
@@ -371,6 +386,13 @@ class AnalysisOrchestrator:
             "model_name": "flowguard-deterministic-core",
             "model_version": FINANCIAL_CORE_VERSION,
             "prompt_version": "rule-based-investigator-1",
+            "agent_mode": getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
+            "agent_model": getattr(self.investigator, "agent_model", None),
+            "agent_prompt_version": getattr(
+                self.investigator,
+                "prompt_version",
+                "rule-based-investigator-1",
+            ),
             "policy_version": POLICY_VERSION,
             "simulation_seed": DEFAULT_SIMULATION_SEED,
             "is_virtual": is_virtual,

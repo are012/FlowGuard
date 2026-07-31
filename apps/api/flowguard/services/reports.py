@@ -57,6 +57,7 @@ class ReportQueryService:
             "risk_metrics": report["risk_metrics"],
             "next_risk": report["risk_metrics"],
             "recommendation": recommendation,
+            "decision_trace": report.get("agent", {}).get("decision_trace"),
             "data_quality": report["data_quality"],
             "analysis_status": report["analysis_status"],
             "refresh_status": report["refresh_status"],

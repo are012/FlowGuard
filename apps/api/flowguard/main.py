@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +14,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from flowguard.api import router
+from flowguard.services.agent_factory import build_investigator
 from flowguard.services.analysis import AnalysisOrchestrator
 from flowguard.services.data import DataService
 from flowguard.services.errors import ServiceError
@@ -19,6 +22,8 @@ from flowguard.services.recommendations import RecommendationService
 from flowguard.services.reports import ReportQueryService
 from flowguard.services.tools import CoreToolService
 from flowguard.storage import FlowGuardRepository, StorageError
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 
 def create_app(repository: FlowGuardRepository | None = None) -> FastAPI:
@@ -29,9 +34,14 @@ def create_app(repository: FlowGuardRepository | None = None) -> FastAPI:
     )
     repository = repository or FlowGuardRepository()
     tools = CoreToolService(repository)
+    investigator = build_investigator(repository, tools)
     app.state.repository = repository
     app.state.data_service = DataService(repository)
-    app.state.analysis_service = AnalysisOrchestrator(repository, tools=tools)
+    app.state.analysis_service = AnalysisOrchestrator(
+        repository,
+        tools=tools,
+        investigator=investigator,
+    )
     app.state.recommendation_service = RecommendationService(
         repository, tools, app.state.analysis_service
     )
