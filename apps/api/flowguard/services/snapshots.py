@@ -102,9 +102,8 @@ class SnapshotBuilder:
         derived_timestamps: list[str] = []
         for kind, id_field in UPDATED_AT_KINDS.items():
             for record in body[kind]:
-                if "updated_at" not in record:
-                    record["updated_at"] = as_of.isoformat()
-                    derived_timestamps.append(f"{kind}:{record[id_field]}")
+                record["updated_at"] = as_of.isoformat()
+                derived_timestamps.append(f"{kind}:{record[id_field]}")
 
         # ``installment_months`` exists only as an import-time detection signal.
         # A confirmed installment has its own InstallmentPlan record.
