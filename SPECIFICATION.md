@@ -1250,6 +1250,70 @@ confirm_receivable
 
 # 20. MCP 도구 계약
 
+## 20.1 AI 서버 계약(백엔드 ↔ AI)
+
+백엔드와 AI 서버는 다음 JSON 계약을 사용한다. 계약은 `schemaVersion: "1.0"`을 기준으로 버전 관리한다.
+
+### 20.1.1 백엔드 → AI 요청
+
+```json
+{
+  "schemaVersion": "1.0",
+  "analysisId": "analysis-001",
+  "calculatedAt": "2026-07-26T21:30:00+09:00",
+  "facts": {
+    "safeToSpend": 180000,
+    "nextRisk": {
+      "type": "PAYMENT_ACCOUNT_SHORTAGE",
+      "date": "2026-08-03",
+      "shortageAmount": 240000
+    },
+    "cashflowSummary": {
+      "lowestBalance": -240000,
+      "lowestBalanceDate": "2026-08-03"
+    }
+  },
+  "evidence": [],
+  "actionCandidates": []
+}
+```
+
+### 20.1.2 AI → 백엔드 응답
+
+```json
+{
+  "schemaVersion": "1.0",
+  "analysisId": "analysis-001",
+  "riskExplanation": "string",
+  "rankedActions": [
+    {
+      "actionId": "transfer-1",
+      "priority": 1,
+      "reason": "string"
+    }
+  ],
+  "userMessage": "string"
+}
+```
+
+### 20.1.3 계약 규칙
+
+- AI는 기존 `actionCandidate`를 우선 선택한다.
+- AI는 새 행동을 제안할 수 있지만, 사용자 화면에는 즉시 노출하지 않는다.
+- 새 행동은 백엔드의 `validate_action` 단계를 통과해야만 표시한다.
+- AI 응답이 잘못된 JSON이거나 스키마를 위반하면, 백엔드는 규칙 기반 폴백 메시지로 처리한다.
+- AI 서버 타임아웃은 3초로 한다.
+- AI 서버 실패 시 백엔드는 계산 결과와 규칙 기반 폴백 문장을 반환한다.
+- 같은 `analysisId`에 대해 중복 호출을 허용한다. 각 호출은 독립적으로 처리한다.
+
+### 20.1.4 처리 규칙
+
+- `analysisId`는 백엔드 분석 요청의 식별자와 일치해야 한다.
+- `rankedActions`의 `actionId`는 백엔드가 제공한 후보 중 하나여야 한다.
+- `reason`은 사용자에게 노출될 수 있는 설명이므로 비속어·과장·허위 진술을 포함하지 않는다.
+- `userMessage`는 1~2문장 내로 간결하게 작성한다.
+
+
 ## 20.1 공통 규칙
 
 - 모든 도구 입력에 `snapshot_id` 또는 이를 추적할 수 있는 식별자를 포함한다.
