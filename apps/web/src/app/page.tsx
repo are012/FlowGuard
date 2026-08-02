@@ -336,7 +336,7 @@ export default function DashboardPage() {
       <section className="agent-trace" aria-labelledby="agent-trace-title">
         <div className="agent-trace-header">
           <div>
-            <p className="card-kicker">확인 가능한 판단 과정</p>
+            <p className="card-kicker">규칙이 계산한 과정</p>
             <h2 id="agent-trace-title">위험에서 추천까지 확인한 과정</h2>
             <p>
               금액과 날짜, 위험 판정은 정해진 계산 규칙으로 구합니다. AI가
@@ -366,6 +366,10 @@ export default function DashboardPage() {
               data.interpretation_status,
               data.interpretation,
             )}
+            <small>
+              아래 단계는 규칙이 계산했고, AI는 그 결과를 이 문장으로
+              옮겨 적기만 합니다.
+            </small>
           </span>
         </div>
 

@@ -561,3 +561,11 @@
     padding: 0 6px;
   }
 }
+
+/* AI가 담당한 범위를 배너 안에서 분명히 한다 */
+.agent-interpretation small {
+  color: var(--ink-muted);
+  display: block;
+  font-size: 10px;
+  margin-top: 5px;
+}
