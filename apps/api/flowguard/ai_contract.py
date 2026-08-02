@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import date
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
+    AfterValidator,
     AwareDatetime,
     BaseModel,
     ConfigDict,
@@ -192,6 +193,168 @@ class LabelClassificationResponse(LabelClassificationEnvelope):
         return self
 
 
+class InvestigationEnvelope(AIContractModel):
+    schemaVersion: Literal["1.3"]
+    contractVersion: Literal["1.3"]
+    promptVersion: Literal["invest-1"]
+    requestId: AIIdentifier
+    idempotencyKey: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)
+    ]
+    analysisId: AIIdentifier
+    snapshotId: AIIdentifier
+    snapshotRevision: AIIdentifier
+    locale: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=35)]
+
+
+class InvestigationTool(StrEnum):
+    GET_FINANCIAL_CONTEXT = "get_financial_context"
+    GET_COUNTERPARTY_EVIDENCE = "get_counterparty_evidence"
+    QUERY_FINANCIAL_EVENTS = "query_financial_events"
+
+
+class InvestigationActionType(StrEnum):
+    TRANSFER = "transfer"
+    RESERVE_FUNDS = "reserve_funds"
+    ADJUST_DISCRETIONARY_BUDGET = "adjust_discretionary_budget"
+    PAUSE_SAVINGS = "pause_savings"
+    SHIFT_PAYMENT_DATE = "shift_payment_date"
+    DELAY_PURCHASE = "delay_purchase"
+    ADD_INSTALLMENT = "add_installment"
+    CONFIRM_RECEIVABLE = "confirm_receivable"
+
+
+class InvestigationShortfallType(StrEnum):
+    PAYMENT_ACCOUNT = "PAYMENT_ACCOUNT"
+    TOTAL_LIQUIDITY = "TOTAL_LIQUIDITY"
+
+
+class EventWindow(AIContractModel):
+    dateFrom: date
+    dateTo: date
+
+    @model_validator(mode="after")
+    def starts_on_or_before_end(self) -> EventWindow:
+        if self.dateFrom > self.dateTo:
+            raise ValueError("eventWindow dateFrom must be on or before dateTo")
+        return self
+
+
+class InvestigationTarget(AIContractModel):
+    counterpartyIds: list[AIIdentifier] = Field(max_length=500)
+    eventWindow: EventWindow
+    actionTypes: list[InvestigationActionType] = Field(max_length=8)
+
+    @model_validator(mode="after")
+    def identifiers_are_unique(self) -> InvestigationTarget:
+        if len(self.counterpartyIds) != len(set(self.counterpartyIds)):
+            raise ValueError("counterpartyIds values must be unique")
+        if len(self.actionTypes) != len(set(self.actionTypes)):
+            raise ValueError("actionTypes values must be unique")
+        return self
+
+
+class InvestigationBaseline(AIContractModel):
+    type: InvestigationShortfallType
+    date: date
+    shortageAmount: Annotated[int, Field(strict=True, gt=0)]
+
+
+class InvestigationParams(AIContractModel):
+    counterpartyId: AIIdentifier | None = None
+    dateFrom: date | None = None
+    dateTo: date | None = None
+    actionType: InvestigationActionType | None = None
+
+    @model_validator(mode="after")
+    def has_a_complete_ordered_date_range(self) -> InvestigationParams:
+        if (self.dateFrom is None) != (self.dateTo is None):
+            raise ValueError("dateFrom and dateTo must be provided together")
+        if self.dateFrom is not None and self.dateTo is not None and self.dateFrom > self.dateTo:
+            raise ValueError("dateFrom must be on or before dateTo")
+        return self
+
+
+def _numeric_free_text(value: str) -> str:
+    if contains_numeric_expression(value):
+        raise ValueError("investigation free text must not contain numeric expressions")
+    return value
+
+
+InvestigationFreeText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
+    AfterValidator(_numeric_free_text),
+]
+
+
+class Investigation(AIContractModel):
+    tool: InvestigationTool
+    params: InvestigationParams
+    reason: InvestigationFreeText
+
+
+class InvestigationObservation(AIContractModel):
+    tool: InvestigationTool
+    params: InvestigationParams
+    reason: InvestigationFreeText
+    result: dict[str, Any]
+
+
+class InvestigationRequestBase(InvestigationEnvelope):
+    baseline: InvestigationBaseline
+    targets: InvestigationTarget
+
+
+class InvestigationPlanRequest(InvestigationRequestBase):
+    pass
+
+
+class InvestigationPlanResponse(InvestigationEnvelope):
+    investigations: list[Investigation] = Field(min_length=1, max_length=3)
+
+
+class InvestigationConcludeRequest(InvestigationRequestBase):
+    observations: list[InvestigationObservation] = Field(min_length=1, max_length=6)
+    allowAdditionalInvestigations: Annotated[bool, Field(strict=True)]
+
+
+class InvestigationHypothesis(AIContractModel):
+    type: AIIdentifier
+    summary: InvestigationFreeText
+    priority: Annotated[int, Field(strict=True, ge=1, le=3)]
+
+
+class InvestigationConclusion(AIContractModel):
+    hypotheses: list[InvestigationHypothesis] = Field(min_length=1, max_length=3)
+    candidatePriorities: list[InvestigationActionType] = Field(max_length=8)
+    unresolved: list[InvestigationFreeText] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def priorities_are_unique(self) -> InvestigationConclusion:
+        hypothesis_priorities = [item.priority for item in self.hypotheses]
+        if len(hypothesis_priorities) != len(set(hypothesis_priorities)):
+            raise ValueError("hypothesis priority values must be unique")
+        if len(self.candidatePriorities) != len(set(self.candidatePriorities)):
+            raise ValueError("candidatePriorities values must be unique")
+        return self
+
+
+class InvestigationConcludeResponse(InvestigationEnvelope):
+    additionalInvestigations: list[Investigation] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2,
+    )
+    conclusion: InvestigationConclusion | None = None
+
+    @model_validator(mode="after")
+    def has_exactly_one_outcome(self) -> InvestigationConcludeResponse:
+        if (self.additionalInvestigations is None) == (self.conclusion is None):
+            raise ValueError("exactly one of additionalInvestigations or conclusion is required")
+        return self
+
+
 __all__ = [
     "AIActionCandidatePayload",
     "AIActionCandidateRef",
@@ -205,4 +368,21 @@ __all__ = [
     "LabelClassificationRequest",
     "LabelClassificationResponse",
     "LabelEntityKind",
+    "EventWindow",
+    "Investigation",
+    "InvestigationActionType",
+    "InvestigationBaseline",
+    "InvestigationConclusion",
+    "InvestigationConcludeRequest",
+    "InvestigationConcludeResponse",
+    "InvestigationEnvelope",
+    "InvestigationHypothesis",
+    "InvestigationObservation",
+    "InvestigationParams",
+    "InvestigationPlanRequest",
+    "InvestigationPlanResponse",
+    "InvestigationRequestBase",
+    "InvestigationShortfallType",
+    "InvestigationTarget",
+    "InvestigationTool",
 ]
