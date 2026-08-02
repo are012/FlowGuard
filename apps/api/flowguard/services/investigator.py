@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -25,6 +26,9 @@ from flowguard.storage import FlowGuardRepository
 
 from .errors import ServiceError
 from .investigation_loop import (
+    MAX_PHASES,
+    PHASE_TIMEOUT,
+    TOTAL_BUDGET,
     InvestigationAIClient,
     InvestigationLoop,
     InvestigationLoopOutcome,
@@ -32,6 +36,26 @@ from .investigation_loop import (
 from .tools import CoreToolService
 
 MAX_TOOL_CALLS = 10
+
+
+def _investigation_total_budget() -> float:
+    """조사 루프 총예산. 비동기 실행에서는 더 넓게 줄 수 있다.
+
+    동기 실행은 요청이 그만큼 점유되므로 기본값을 좁게 두지만,
+    FLOWGUARD_ANALYSIS_ASYNC=on 이면 요청 밖에서 돌기 때문에
+    지연이 사용자 대기로 이어지지 않는다.
+    """
+
+    raw = os.getenv("FLOWGUARD_AI_INVESTIGATION_BUDGET_SECONDS", "").strip()
+    if not raw:
+        return TOTAL_BUDGET
+    try:
+        budget = float(raw)
+    except ValueError:
+        return TOTAL_BUDGET
+    return max(budget, PHASE_TIMEOUT * MAX_PHASES)
+
+
 MAX_CANDIDATE_PLANS = 5
 MAX_EVALUATED_CANDIDATES = 3
 MAX_EXPOSED_ALTERNATIVES = 2
@@ -753,6 +777,7 @@ class LiquidityInvestigator:
             outcome = InvestigationLoop(
                 self.investigation_client,
                 execute_tool,
+                total_budget=_investigation_total_budget(),
             ).run(payload)
         except Exception as exc:
             self._fail_investigation_run(

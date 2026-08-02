@@ -356,15 +356,24 @@ class InvestigationLoop:
         observation_projector: Callable[[Any, Mapping[str, Any]], dict[str, Any]] = (
             project_observation
         ),
+        total_budget: float | None = None,
     ) -> None:
         self.client = client
         self.execute_tool = execute_tool
         self.clock = clock
         self.observation_projector = observation_projector
+        # 동기 실행에서는 요청이 그만큼 점유되므로 예산을 좁게 둔다.
+        # 요청 밖에서 실행할 때는 호출자가 더 넓은 예산을 줄 수 있다.
+        self.total_budget = TOTAL_BUDGET if total_budget is None else total_budget
+        if self.total_budget < PHASE_TIMEOUT * MAX_PHASES:
+            raise ValueError(
+                "total_budget must cover every phase timeout: "
+                f"{self.total_budget} < {PHASE_TIMEOUT * MAX_PHASES}"
+            )
 
     def run(self, payload: Mapping[str, Any]) -> InvestigationLoopOutcome:
         started_at = self.clock()
-        deadline = started_at + TOTAL_BUDGET
+        deadline = started_at + self.total_budget
         turns: list[InvestigationTurnRecord] = []
         observations: list[dict[str, Any]] = []
         tool_call_count = 0
