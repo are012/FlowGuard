@@ -91,10 +91,15 @@ test("sample data completes the safe virtual recommendation demo", async ({
 
   await page.locator('.setup-complete a[href="/"]').click();
   await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByText("결정론적 금융 분석", { exact: true })).toBeVisible();
+  // 판단 주체가 규칙임을 화면이 사용자 언어로 밝히는지 확인한다.
+  await expect(page.getByText("규칙이 계산한 과정", { exact: true })).toBeVisible();
+  await expect(page.getByText("같은 정보 · 같은 결과", { exact: true })).toBeVisible();
   await expect(
     page.getByText("AI 해석 · 규칙 기반 설명", { exact: true }),
   ).toBeVisible();
+  await expect(
+    page.locator(".agent-interpretation small"),
+  ).toContainText("AI는 그 결과를 이 문장으로 옮겨 적기만 합니다");
 
   const dashboardResponse = await request.get(`${API_URL}/api/v1/dashboard`);
   expect(dashboardResponse.ok()).toBe(true);
