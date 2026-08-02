@@ -869,11 +869,11 @@ ACT_NOW
 
 ---
 
-# 14. 에이전트 계약
+# 14. 백엔드 조사기 계약
 
 ## 14.1 역할
 
-Liquidity Investigator Agent는 다음을 수행한다.
+Liquidity Investigator Agent는 `flowguard-worker` 내부의 백엔드 구성요소이며 다음을 수행한다.
 
 - 기준 분석 결과 확인
 - 주요 위험 원인 가설 생성
@@ -884,6 +884,14 @@ Liquidity Investigator Agent는 다음을 수행한다.
 - 효과가 부족하거나 반동위험이 있는 계획 수정
 - 정책 검증 결과 확인
 - 최종 추천 근거 구조화
+
+별도 AI 서비스가 존재하더라도, 다음 책임은 백엔드 조사기에 남는다.
+
+- MCP 도구 선택 및 호출
+- 후보 대응안 생성
+- 후보 대응안 평가
+- 정책 검증 통과 여부 판단
+- 추천 저장 및 실행 상태 기록
 
 ## 14.2 제한
 
@@ -903,6 +911,10 @@ Liquidity Investigator Agent는 다음을 수행한다.
 에이전트는 정의되지 않은 행동 유형을 생성하지 않는다.
 
 에이전트는 정책 검증을 통과하지 않은 대응안을 최종 추천으로 확정하지 않는다.
+
+에이전트는 OpenAI API 키를 소유하지 않는다.
+
+에이전트는 별도 AI 서비스 없이도 결정론적 후보 생성을 완료할 수 있어야 한다.
 
 ## 14.3 실행 한도
 
@@ -938,20 +950,21 @@ Liquidity Investigator Agent는 다음을 수행한다.
   "recommended_plan": null,
   "policy_result": null,
   "decision_trace": {
-    "mode": "LUNA",
-    "model": "gpt-5.6-luna",
+    "mode": "DETERMINISTIC",
+    "model": null,
     "fallback_reason": null,
     "steps": [],
     "usage": null
   },
+  "interpretation_request_id": null,
   "analysis_complete": false
 }
 ```
 
 `decision_trace.steps`는 위험 가설, 실제 도구 호출, 후보 평가, 최종 선택처럼
 저장된 실행 산출물만 포함한다. 모델의 숨은 사고과정이나 원문 추론 토큰은 저장하거나
-사용자에게 노출하지 않는다. 모델을 실행하지 못한 경우 `mode`와
-`fallback_reason`으로 결정론적 폴백을 명시한다.
+사용자에게 노출하지 않는다. AI 해석 요청 및 응답은 별도 `ai_interpretation_runs`
+모델에 저장하며, 조사기 상태와 분리한다.
 
 ---
 
@@ -1260,18 +1273,26 @@ confirm_receivable
 
 ---
 
-# 20. MCP 도구 계약
+# 20. 서비스 및 MCP 도구 계약
 
-## 20.1 AI 서버 계약(백엔드 ↔ AI)
+## 20.1 AI 해석 서버 계약(백엔드 ↔ AI Service)
 
-백엔드와 AI 서버는 다음 JSON 계약을 사용한다. 계약은 `schemaVersion: "1.0"`을 기준으로 버전 관리한다.
+백엔드와 AI 서비스는 다음 JSON 계약을 사용한다. 계약은 `schemaVersion: "1.1"`을 기준으로 버전 관리한다.
+이 계약은 **구조화 해석 전용**이며, 금융 계산·MCP 호출·후보 생성 책임을 AI 서비스에 넘기지 않는다.
 
 ### 20.1.1 백엔드 → AI 요청
 
 ```json
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
+  "contractVersion": "1.1",
+  "promptVersion": "3",
+  "requestId": "ai-request-001",
+  "idempotencyKey": "analysis-001:rev-7:contract-1.1:prompt-3:ko-KR",
   "analysisId": "analysis-001",
+  "snapshotId": "snapshot-007",
+  "snapshotRevision": "rev-7",
+  "locale": "ko-KR",
   "calculatedAt": "2026-07-26T21:30:00+09:00",
   "facts": {
     "safeToSpend": 180000,
@@ -1294,8 +1315,15 @@ confirm_receivable
 
 ```json
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
+  "contractVersion": "1.1",
+  "promptVersion": "3",
+  "requestId": "ai-request-001",
+  "idempotencyKey": "analysis-001:rev-7:contract-1.1:prompt-3:ko-KR",
   "analysisId": "analysis-001",
+  "snapshotId": "snapshot-007",
+  "snapshotRevision": "rev-7",
+  "locale": "ko-KR",
   "riskExplanation": "string",
   "rankedActions": [
     {
@@ -1310,23 +1338,37 @@ confirm_receivable
 
 ### 20.1.3 계약 규칙
 
-- AI는 기존 `actionCandidate`를 우선 선택한다.
-- AI는 새 행동을 제안할 수 있지만, 사용자 화면에는 즉시 노출하지 않는다.
-- 새 행동은 백엔드의 `validate_action` 단계를 통과해야만 표시한다.
+- AI는 기존 `actionCandidates`의 순위화와 설명 생성만 수행한다.
+- AI는 새 금액, 새 날짜, 새 위험 판정, 새 행동 유형을 생성하지 않는다.
+- AI 응답에 백엔드가 제공하지 않은 금액·날짜·행동이 들어오면 백엔드는 해당 응답을 신뢰하지 않는다.
 - AI 응답이 잘못된 JSON이거나 스키마를 위반하면, 백엔드는 규칙 기반 폴백 메시지로 처리한다.
-- AI 서버 타임아웃은 3초로 한다.
+- AI 서비스는 DB에 직접 접근하지 않는다.
+- AI 서비스는 MVP 기준 MCP를 직접 호출하지 않는다.
+- 연결 타임아웃은 3초, 응답 타임아웃은 10초, 전체 요청 한도는 15초로 한다.
+- 재시도는 최대 1회만 허용한다.
+- 재시도 가능 오류는 연결 실패, 일시적 타임아웃, `429`, `502`, `503`, `504`다.
+- 재시도 금지 오류는 JSON 구조 오류, `analysisId`/`requestId`/`snapshotRevision` 불일치, 허용되지 않은 `actionId`, 명백한 4xx 계약 오류다.
 - AI 서버 실패 시 백엔드는 계산 결과와 규칙 기반 폴백 문장을 반환한다.
-- 같은 `analysisId`에 대해 중복 호출을 허용한다. 각 호출은 독립적으로 처리한다.
+- 같은 `analysisId`로 요청 전송은 여러 번 허용한다.
+- 단, 같은 `idempotencyKey`를 가진 논리적 요청은 한 번만 실행한다.
+- 동일 `idempotencyKey` 요청이 이미 실행 중이면 기존 실행 상태를 반환한다.
+- 동일 `idempotencyKey` 요청이 이미 성공했으면 저장된 결과를 반환한다.
+- 명시적 재생성 요청은 새로운 `promptVersion` 또는 `regenerationId`로 구분한다.
 
 ### 20.1.4 처리 규칙
 
+- `requestId`는 백엔드가 생성한 AI 요청 식별자와 일치해야 한다.
 - `analysisId`는 백엔드 분석 요청의 식별자와 일치해야 한다.
+- `snapshotId`는 백엔드가 해석 요청에 사용한 스냅숏과 일치해야 한다.
+- `snapshotRevision`은 백엔드가 해석 요청에 사용한 revision과 일치해야 한다.
+- `idempotencyKey`는 백엔드가 생성한 논리적 요청 키와 일치해야 한다.
 - `rankedActions`의 `actionId`는 백엔드가 제공한 후보 중 하나여야 한다.
+- `rankedActions`의 `actionId`는 중복될 수 없다.
+- `rankedActions`의 `priority`는 중복될 수 없다.
 - `reason`은 사용자에게 노출될 수 있는 설명이므로 비속어·과장·허위 진술을 포함하지 않는다.
 - `userMessage`는 1~2문장 내로 간결하게 작성한다.
 
-
-## 20.1 공통 규칙
+## 20.2 공통 규칙
 
 - 모든 도구 입력에 `snapshot_id` 또는 이를 추적할 수 있는 식별자를 포함한다.
 - 모든 계산 도구 결과에 `tool_version`을 포함한다.
@@ -1336,7 +1378,7 @@ confirm_receivable
 
 ---
 
-## 20.2 get_financial_context
+## 20.3 get_financial_context
 
 ### 입력
 
@@ -1364,7 +1406,7 @@ confirm_receivable
 
 ---
 
-## 20.3 get_counterparty_evidence
+## 20.4 get_counterparty_evidence
 
 ### 입력
 
@@ -1392,7 +1434,7 @@ confirm_receivable
 
 ---
 
-## 20.4 query_financial_events
+## 20.5 query_financial_events
 
 ### 입력
 
@@ -1416,7 +1458,7 @@ confirm_receivable
 
 ---
 
-## 20.5 simulate_cashflow
+## 20.6 simulate_cashflow
 
 ### 입력
 
@@ -1444,7 +1486,7 @@ confirm_receivable
 
 ---
 
-## 20.6 calculate_safe_to_spend
+## 20.7 calculate_safe_to_spend
 
 ### 입력
 
@@ -1471,7 +1513,7 @@ confirm_receivable
 
 ---
 
-## 20.7 evaluate_action_plan
+## 20.8 evaluate_action_plan
 
 ### 입력
 
@@ -1498,7 +1540,7 @@ confirm_receivable
 
 ---
 
-## 20.8 validate_financial_policy
+## 20.9 validate_financial_policy
 
 ### 입력
 
@@ -1575,18 +1617,49 @@ POST /api/v1/recommendations/{recommendation_id}/reject
 POST /api/v1/recommendations/{recommendation_id}/alternatives
 ```
 
-## 21.5 분석 상태
+## 21.5 분석 및 해석 상태
+
+공개 API는 금융 분석 상태와 AI 해석 상태를 분리한다.
+
+### analysis_status
 
 ```text
 QUEUED
+RUNNING
+SUCCEEDED
+FAILED
+SUPERSEDED
+```
+
+### interpretation_status
+
+```text
+NOT_REQUESTED
+QUEUED
+RUNNING
+SUCCEEDED
+FALLBACK
+FAILED
+STALE
+```
+
+### 내부 실행 단계
+
+세부 진행 상태는 별도 `execution_stage` 또는 이벤트 스트림으로 유지한다.
+
+```text
 SNAPSHOT_BUILDING
 BASELINE_ANALYZING
 AGENT_INVESTIGATING
 PLAN_EVALUATING
 REPORT_BUILDING
-COMPLETED
-FAILED
+INTERPRETATION_REQUESTING
+INTERPRETATION_VALIDATING
 ```
+
+AI 해석 실패는 `analysis_status=FAILED` 조건이 아니다. 금융 코어와 후보 검증이 성공하면
+`analysis_status=SUCCEEDED`이며, AI 실패 시 `interpretation_status=FALLBACK` 또는
+`FAILED`를 사용한다.
 
 ---
 
@@ -1621,6 +1694,56 @@ created_at
 - 사용자 승인·거절 이력
 - 실패 상태와 오류 정보
 
+최신 리포트 승격은 완료 시각이 아니라 revision 기준으로 판정한다.
+
+```text
+result.snapshotRevision < latestDataRevision
+→ analysis_status = SUPERSEDED 또는 interpretation_status = STALE
+→ 실행 기록은 저장
+→ latest report 포인터는 갱신하지 않음
+```
+
+대시보드 및 최신 리포트 응답에는 최소한 다음 메타데이터를 포함한다.
+
+```json
+{
+  "reportRevision": "rev-7",
+  "latestDataRevision": "rev-8",
+  "isStale": true,
+  "refreshStatus": "RUNNING"
+}
+```
+
+## 22.1 AI 해석 실행 저장 모델
+
+```text
+ai_interpretation_runs
+```
+
+최소 컬럼:
+
+```text
+interpretation_id
+analysis_id
+snapshot_id
+snapshot_revision
+request_id
+idempotency_key
+contract_version
+prompt_version
+model_name
+status
+attempt_count
+fallback_used
+latency_ms
+response_payload
+error_code
+created_at
+completed_at
+```
+
+`idempotency_key`에는 unique constraint를 둔다.
+
 ---
 
 # 23. 실패 처리
@@ -1631,7 +1754,9 @@ created_at
 - 금융 코어 계산이 실패하면 추천안을 생성하지 않는다.
 - 정책 검증이 실패하면 해당 대응안을 사용자에게 최종 추천으로 노출하지 않는다.
 - 분석 실패를 `STABLE`로 변환하지 않는다.
+- AI 해석 실패만으로 금융 분석 전체를 `FAILED`로 처리하지 않는다.
 - 오래된 스냅숏의 추천안을 승인하려 하면 최신 데이터로 재검증한다.
+- 오래된 `snapshotRevision`의 분석 결과나 AI 응답은 저장할 수 있지만 `latest report`로 승격하지 않는다.
 - 이전 성공 리포트와 현재 실패 상태를 구분해 저장한다.
 - 사용자 화면에는 마지막 성공 분석시각과 현재 갱신 상태를 함께 표시할 수 있다.
 

@@ -66,14 +66,14 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
                                │ 기준 분석 결과
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
-│              Liquidity Investigator Agent                     │
+│          Backend Recommendation Builder                       │
 │                                                               │
 │  위험 원인 조사 · 필요한 근거 선택                            │
 │  거래처 지급이력 확인 · 위험 가설 수립                        │
 │  후보 대응안 구성 · 결과 재검토                               │
 │                                                               │
+│  ※ 백엔드 worker 소유                                         │
 │  ※ 숫자를 직접 계산하지 않음                                 │
-│  ※ 사용자와 대화하는 챗봇이 아님                             │
 └──────────────────────────────┬────────────────────────────────┘
                                │ MCP 호출
                                ▼
@@ -92,6 +92,15 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 │  금융 스냅숏 복사본에 가상 적용                              │
 │  13주 현금흐름 재계산                                         │
 │  적용 전후 비교 · 반동위험 검사 · 금융정책 검증               │
+└──────────────────────────────┬────────────────────────────────┘
+                               │ 최소 facts/evidence/actionCandidates
+                               ▼
+┌───────────────────────────────────────────────────────────────┐
+│                 AI Interpretation Service                     │
+│                                                               │
+│  OpenAI 호출 · 후보 순위화 · 설명 생성                        │
+│  DB 직접 접근 없음 · MCP 직접 호출 없음                       │
+│  request/response 계약 검증 · 타임아웃 · 재시도 · 폴백        │
 └──────────────────────────────┬────────────────────────────────┘
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
@@ -149,14 +158,31 @@ CSV 업로드 또는 데이터 수정
         ↓
 후보 대응안 생성 및 수치 검증
         ↓
+AI 서비스 구조화 해석 요청
+        ↓
 사용자용 리포트 생성
         ↓
-최신 분석 결과로 교체
+최신 revision 결과만 최신 리포트로 승격
 ```
 
 최초 설정 확정과 분석은 분리합니다. 환경설정과 여러 후보 결정은 먼저 하나의
 트랜잭션으로 저장하며, 전부 성공한 경우에만 분석을 한 번 실행합니다. 분석 중에는
-외부 모델 호출을 포함할 수 있으므로 데이터베이스 트랜잭션을 열어 두지 않습니다.
+외부 AI 호출을 포함할 수 있으므로 데이터베이스 트랜잭션을 열어 두지 않습니다.
+
+분석 결과 저장 순서는 다음 원칙을 따릅니다.
+
+```text
+백엔드 계산 완료
+        ↓
+기준 분석 결과 저장
+        ↓
+AI 해석 요청 및 저장
+        ↓
+snapshotRevision이 최신일 때만 latest report 승격
+```
+
+오래된 revision의 분석이나 AI 응답이 늦게 도착하더라도 실행 기록은 저장하고,
+`latest report` 포인터는 더 최신 `snapshotRevision`이 가진 결과만 가리킵니다.
 
 이 흐름 자체는 마이데이터 자산관리 서비스와 유사합니다. FlowGuard의 특징은 분석 대상이 자산 구성이나 과거 소비가 아니라 **향후 13주의 유동성 위험과 대응 행동**이라는 점입니다.
 
@@ -228,9 +254,10 @@ MVP에서는 가상 적용
 
 동일한 입력과 설정에는 동일한 결과가 나오도록 구현합니다.
 
-## Liquidity Investigator Agent
+## Backend Recommendation Builder
 
 계산 결과를 바탕으로 무엇을 추가로 확인하고 어떤 대응안을 검토할지 결정합니다.
+이 구성요소는 `flowguard-worker` 안의 백엔드 책임이며 별도 AI 서비스가 아닙니다.
 
 * 주요 위험 원인 가설 생성
 * 필요한 거래처 지급 근거 조회
@@ -253,15 +280,47 @@ Safe-to-Spend
 
 ### MVP 실행 프로필
 
-`FLOWGUARD_AGENT_MODE=auto`가 기본값입니다. `OPENAI_API_KEY`가 있으면
-`gpt-5.6-luna`가 Responses API의 함수 호출을 통해 필요한 조회 도구와
-백엔드 생성 후보를 선택합니다. 키가 없거나 모델 호출이 실패하면 기존 결정론적
-조사기로 전환하고 그 사유를 분석 리포트에 기록합니다.
+공모전 MVP의 최종 배포 구조는 **백엔드 worker + 별도 AI Interpretation Service**
+입니다.
 
-모델은 금액·날짜·확률을 직접 계산하지 않으며, 금융 코어가 가상 적용과 정책
+- `flowguard-worker`는 스냅숏 생성, 금융 코어 계산, 위험 조사, 후보 대응안 생성,
+  정책 검증, 상태 저장을 담당합니다.
+- `flowguard-mcp`와 코어 도구는 백엔드 소유입니다.
+- AI 서비스는 백엔드가 전달한 `facts`, `evidence`, `actionCandidates`만 받아
+  OpenAI를 호출하고 순위화·설명 생성만 수행합니다.
+- OpenAI API 키는 AI 서비스에만 둡니다.
+- AI 서비스는 DB에 직접 접근하지 않으며, MVP에서는 MCP를 직접 호출하지 않습니다.
+
+따라서 모델은 금액·날짜·확률을 직접 계산하지 않으며, 금융 코어가 가상 적용과 정책
 검증을 마친 후보만 최종 추천으로 사용할 수 있습니다. 화면에는 숨은 사고과정이
 아니라 위험 가설, 실제 도구 호출, 후보 검증 결과, 최종 선택 이유로 구성된 공개
 감사 추적만 표시합니다.
+
+## AI 해석 상태 분리
+
+FlowGuard는 금융 분석 성공과 AI 해석 성공을 같은 상태로 취급하지 않습니다.
+
+```text
+analysis_status
+→ 금융 코어와 후보 검증의 성공 여부
+
+interpretation_status
+→ AI 응답, 규칙 기반 폴백, 또는 해석 실패 여부
+```
+
+예를 들어 AI 서비스가 실패해도 다음 상태는 정상입니다.
+
+```json
+{
+  "analysisStatus": "SUCCEEDED",
+  "interpretationStatus": "FALLBACK",
+  "interpretation": {
+    "source": "DETERMINISTIC_FALLBACK"
+  }
+}
+```
+
+즉, AI 실패는 금융 분석 전체를 `FAILED`로 바꾸지 않습니다.
 
 ---
 
@@ -635,6 +694,7 @@ FlowGuard 종합 분석
 flowguard-web
 flowguard-api
 flowguard-worker
+flowguard-ai-service
 flowguard-mcp
 flowguard-postgres
 flowguard-redis
@@ -646,8 +706,9 @@ flowguard-redis
 | -------------------- | --------------------- |
 | `flowguard-web`      | Next.js 사용자 화면        |
 | `flowguard-api`      | FastAPI, 조회·수정·승인 API |
-| `flowguard-worker`   | 스냅숏·분석 작업·정기 실행       |
-| `flowguard-mcp`      | 에이전트용 MCP 도구          |
+| `flowguard-worker`   | 스냅숏·분석 작업·후보 생성·정기 실행 |
+| `flowguard-ai-service` | OpenAI 호출·설명 생성·후보 순위화 |
+| `flowguard-mcp`      | 백엔드 소유 코어/MCP 도구      |
 | `flowguard-postgres` | 원천 데이터·분석 결과·감사 로그    |
 | `flowguard-redis`    | 작업 큐·분석 진행상태·에이전트 상태  |
 
@@ -666,11 +727,13 @@ Financial Snapshot Builder
         ↓
 Deterministic Financial Core
         ↓
-Liquidity Investigator Agent
+Backend Recommendation Builder
         ↓
 MCP를 통한 근거 조회·대응안 평가
         ↓
 정책 검증 및 반동위험 확인
+        ↓
+AI Interpretation Service
         ↓
 Risk Presentation Mapper
         ↓
