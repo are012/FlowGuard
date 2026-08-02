@@ -27,7 +27,12 @@ from .observation_projection import ObservationProjectionError, project_observat
 MAX_PHASES = 2
 MAX_TOOL_CALLS = 6
 PHASE_TIMEOUT = 5.0
-TOTAL_BUDGET = 8.0
+# 단계마다 PHASE_TIMEOUT 을 소진할 수 있으므로 총예산은 그 합보다 커야 한다.
+# 이전 값 8.0 은 5.0 x 2 = 10.0 보다 작아, 1차가 제한시간을 다 쓰면
+# 2차가 시작조차 못 하고 total_timeout 으로 끝났다.
+# 여기에 도구 실행과 검증에 쓸 여유를 더한다.
+TOOL_EXECUTION_ALLOWANCE = 2.0
+TOTAL_BUDGET = PHASE_TIMEOUT * MAX_PHASES + TOOL_EXECUTION_ALLOWANCE
 
 RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 

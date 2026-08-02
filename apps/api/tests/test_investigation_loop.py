@@ -203,7 +203,11 @@ def test_bounds_are_fixed_for_the_synchronous_two_phase_loop() -> None:
     assert loop_module.MAX_PHASES == 2
     assert loop_module.MAX_TOOL_CALLS == 6
     assert loop_module.PHASE_TIMEOUT == 5.0
-    assert loop_module.TOTAL_BUDGET == 8.0
+    # 총예산은 고정값이 아니라 단계 제한시간의 합 + 도구 실행 여유로 정의된다.
+    assert loop_module.TOTAL_BUDGET == (
+        loop_module.PHASE_TIMEOUT * loop_module.MAX_PHASES
+        + loop_module.TOOL_EXECUTION_ALLOWANCE
+    )
 
 
 def test_initial_observation_can_produce_a_successful_conclusion() -> None:
@@ -473,24 +477,34 @@ def test_final_additional_request_is_rejected_and_preserves_both_batches() -> No
 
 
 def test_each_ai_call_receives_the_smaller_phase_or_global_deadline() -> None:
+    # 남은 총예산이 단계 제한시간보다 작아지도록 도구 실행을 길게 잡는다.
+    # 그래야 "둘 중 작은 값"이라는 규칙이 실제로 검증된다.
+    ai_seconds = 4.0
+    tool_seconds = loop_module.TOTAL_BUDGET - ai_seconds - loop_module.PHASE_TIMEOUT + 1.0
     clock = ManualClock()
     client = ScriptedClient(
         plan_result={"investigations": [investigation()]},
         conclude_results=[conclusion()],
         advance_clock=clock.advance,
-        advance_seconds=[4.0, 0.0],
+        advance_seconds=[ai_seconds, 0.0],
     )
 
     def execute(request: Investigation) -> dict[str, Any]:
-        clock.advance(1.0)
+        clock.advance(tool_seconds)
         return raw_result(request)
 
     outcome = InvestigationLoop(client, execute, clock=clock).run(plan_request())
 
+    elapsed = ai_seconds + tool_seconds
+    remaining = loop_module.TOTAL_BUDGET - elapsed
+
     assert outcome.status == "SUCCEEDED"
-    assert client.calls[0][2] == 5.0
-    assert client.calls[1][2] == 3.0
-    assert outcome.total_latency_ms == 5_000
+    # 1차는 아직 예산이 넉넉하므로 단계 제한시간이 적용된다.
+    assert client.calls[0][2] == loop_module.PHASE_TIMEOUT
+    # 2차는 남은 총예산이 더 작으므로 그쪽이 적용된다.
+    assert remaining < loop_module.PHASE_TIMEOUT
+    assert client.calls[1][2] == remaining
+    assert outcome.total_latency_ms == int(elapsed * 1000)
 
 
 def test_tool_returning_after_the_global_deadline_blocks_the_next_ai_call() -> None:
@@ -501,7 +515,7 @@ def test_tool_returning_after_the_global_deadline_blocks_the_next_ai_call() -> N
     )
 
     def slow_execute(request: Investigation) -> dict[str, Any]:
-        clock.advance(8.0)
+        clock.advance(loop_module.TOTAL_BUDGET)
         return raw_result(request)
 
     outcome = InvestigationLoop(client, slow_execute, clock=clock).run(plan_request())
@@ -518,7 +532,7 @@ def test_successful_plan_returned_after_the_deadline_is_failed() -> None:
     client = ScriptedClient(
         plan_result={"investigations": [investigation()]},
         advance_clock=clock.advance,
-        advance_seconds=[8.0],
+        advance_seconds=[loop_module.TOTAL_BUDGET],
     )
 
     outcome = InvestigationLoop(client, raw_result, clock=clock).run(plan_request())
@@ -536,7 +550,7 @@ def test_successful_first_conclusion_returned_after_the_deadline_is_partial() ->
         plan_result={"investigations": [investigation()]},
         conclude_results=[conclusion()],
         advance_clock=clock.advance,
-        advance_seconds=[0.0, 8.0],
+        advance_seconds=[0.0, loop_module.TOTAL_BUDGET],
     )
 
     outcome = InvestigationLoop(client, raw_result, clock=clock).run(plan_request())
@@ -563,7 +577,7 @@ def test_successful_final_conclusion_returned_after_the_deadline_is_partial() ->
             conclusion(),
         ],
         advance_clock=clock.advance,
-        advance_seconds=[0.0, 0.0, 8.0],
+        advance_seconds=[0.0, 0.0, loop_module.TOTAL_BUDGET],
     )
 
     outcome = InvestigationLoop(client, raw_result, clock=clock).run(plan_request())
@@ -779,3 +793,24 @@ def test_http_client_reports_total_timeout_when_transport_fails_after_deadline()
     assert outcome.error_code == "total_timeout"
     assert outcome.attempt_count == 1
     assert call_count == 1
+
+
+def test_total_budget_covers_every_phase_timeout() -> None:
+    """1차가 제한시간을 다 써도 2차가 시작될 수 있어야 한다.
+
+    이전 설정은 PHASE_TIMEOUT 5.0 x MAX_PHASES 2 = 10.0 이 필요한데
+    TOTAL_BUDGET 이 8.0 이라, 1차 지연이 길면 2차가 total_timeout 으로
+    끝나 2단계 설계가 구조적으로 완주할 수 없었다.
+    """
+
+    assert (
+        loop_module.TOTAL_BUDGET
+        >= loop_module.PHASE_TIMEOUT * loop_module.MAX_PHASES
+    )
+
+
+def test_total_budget_leaves_room_for_tool_execution() -> None:
+    """모델 호출 외에 도구 실행과 검증에 쓸 여유가 남아야 한다."""
+
+    slack = loop_module.TOTAL_BUDGET - loop_module.PHASE_TIMEOUT * loop_module.MAX_PHASES
+    assert slack >= loop_module.TOOL_EXECUTION_ALLOWANCE
