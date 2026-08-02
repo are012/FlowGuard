@@ -282,9 +282,149 @@ def test_infeasible_action_cannot_be_ranked() -> None:
         (
             httpx.Response(
                 200,
+                json=response_payload(riskExplanation="입금이 14일 늦어집니다."),
+            ),
+            "unknown_duration_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="위험 확률은 92%입니다."),
+            ),
+            "unknown_percentage_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="부족액은 370,000입니다."),
+            ),
+            "unknown_amount_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="부족액은 370,000."),
+            ),
+            "unknown_amount_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="부족액은 370000입니다."),
+            ),
+            "unknown_numeric_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="부족액은 370000."),
+            ),
+            "unknown_numeric_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="부족액은 9999입니다."),
+            ),
+            "unknown_numeric_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="부족액은 17~24만원입니다."),
+            ),
+            "unknown_amount_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="부족액은 17-24만원입니다."),
+            ),
+            "unknown_amount_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="부족액은 17에서 24만원입니다."),
+            ),
+            "unknown_amount_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="1억원이 부족합니다."),
+            ),
+            "unknown_amount_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="-180,000원이 남습니다."),
+            ),
+            "unknown_amount_claim",
+        ),
+        (
+            httpx.Response(
+                200,
                 json=response_payload(userMessage="2027-01-01에 조치해 주세요."),
             ),
             "unknown_date_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(userMessage="2027. 1. 1.에 조치해 주세요."),
+            ),
+            "unknown_date_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(userMessage="2027-1-1에 조치해 주세요."),
+            ),
+            "unknown_date_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(userMessage="2027/1/1에 조치해 주세요."),
+            ),
+            "unknown_date_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(userMessage="9. 9.에 조치해 주세요."),
+            ),
+            "unknown_numeric_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="삼십칠만 원이 부족합니다."),
+            ),
+            "unknown_amount_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="정시 지급률은 팔십일 퍼센트입니다."),
+            ),
+            "unknown_percentage_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="입금이 평균 열나흘 늦어집니다."),
+            ),
+            "unknown_duration_claim",
+        ),
+        (
+            httpx.Response(
+                200,
+                json=response_payload(riskExplanation="입금이 평균 3주 늦어집니다."),
+            ),
+            "unknown_numeric_claim",
         ),
     ],
 )
@@ -305,3 +445,216 @@ def test_non_retryable_response_falls_back_without_retry(
     assert outcome.error_code == error_code
     assert outcome.attempt_count == 1
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("candidate_amount", "evidence", "risk_explanation"),
+    [
+        (240_000, [], "24만원이 부족합니다."),
+        (240_000, [], "부족액은 240,000입니다."),
+        (10_000_000, [], "1,000만원이 부족합니다."),
+        (100_000_000, [], "1억원이 부족합니다."),
+        (240_000, [], "최저 잔액은 -240,000원입니다."),
+        (240_000, [{"average_delay_days": 14}], "입금이 평균 14일 늦어집니다."),
+        (240_000, [{"on_time_rate": 0.92}], "정시 지급률은 92%입니다."),
+        (240_000, [{"on_time_rate": 0.92}], "정시 지급률은 0.92입니다."),
+        (240_000, [{"payment_history_count": 1_000}], "지급 이력은 1,000건입니다."),
+        (240_000, [], "제1원인은 결제계좌 잔액 부족입니다."),
+    ],
+)
+def test_supplied_numeric_claim_is_allowed(
+    candidate_amount: int,
+    evidence: list[dict[str, Any]],
+    risk_explanation: str,
+) -> None:
+    payload = request_payload()
+    payload["actionCandidates"][0]["amount"] = candidate_amount
+    payload["facts"]["nextRisk"]["shortageAmount"] = candidate_amount
+    payload["facts"]["cashflowSummary"]["lowestBalance"] = -candidate_amount
+    payload["evidence"] = evidence
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=response_payload(riskExplanation=risk_explanation),
+        )
+
+    outcome = client_for(httpx.MockTransport(handler)).interpret(payload)
+
+    assert outcome.status == "SUCCEEDED"
+    assert outcome.error_code is None
+
+
+@pytest.mark.parametrize(
+    ("evidence", "risk_explanation", "error_code"),
+    [
+        ([{"payment_history_count": 4}], "4원이 부족합니다.", "unknown_amount_claim"),
+        (
+            [{"maximum_delay_days": 7}],
+            "위험 확률은 7%입니다.",
+            "unknown_percentage_claim",
+        ),
+        (
+            [{"maximum_delay_days": 7}],
+            "입금이 최대 -7일 늦어집니다.",
+            "unknown_duration_claim",
+        ),
+        (
+            [{"maximum_delay_days": 14}],
+            "입금이 평균 14일 늦어집니다.",
+            "unknown_duration_claim",
+        ),
+        (
+            [{"maximum_delay_days": 14}],
+            "입금이 최대 7~14일 늦어집니다.",
+            "unknown_duration_claim",
+        ),
+        (
+            [{"average_delay_days": 14}],
+            "평균이 아니라 최대 지연은 14일입니다.",
+            "unknown_duration_claim",
+        ),
+        (
+            [{"on_time_rate": 0.92}],
+            "위험 확률은 92%입니다.",
+            "unknown_percentage_claim",
+        ),
+        (
+            [{"on_time_rate": 0.92}],
+            "정시 지급률은 아니지만 위험 확률은 92%입니다.",
+            "unknown_percentage_claim",
+        ),
+        (
+            [{"on_time_rate": 0.92}],
+            "정시 지급률은 92%p 상승했습니다.",
+            "unknown_percentage_claim",
+        ),
+        (
+            [{"on_time_rate": 0.92}],
+            "정시 지급률은 92퍼센트포인트 상승했습니다.",
+            "unknown_percentage_claim",
+        ),
+        (
+            [{"on_time_rate": 0.92}],
+            "정시 지급률은 92%포인트 상승했습니다.",
+            "unknown_percentage_claim",
+        ),
+        (
+            [{"on_time_rate": 0.92}],
+            "정시 지급률은 0.81입니다.",
+            "unknown_percentage_claim",
+        ),
+    ],
+)
+def test_numeric_claim_cannot_borrow_a_value_from_another_unit(
+    evidence: list[dict[str, Any]],
+    risk_explanation: str,
+    error_code: str,
+) -> None:
+    payload = request_payload()
+    payload["evidence"] = evidence
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=response_payload(riskExplanation=risk_explanation),
+        )
+
+    outcome = client_for(httpx.MockTransport(handler)).interpret(payload)
+
+    assert outcome.status == "FALLBACK"
+    assert outcome.error_code == error_code
+    assert outcome.attempt_count == 1
+
+
+@pytest.mark.parametrize(
+    "risk_explanation",
+    [
+        "1억2천만원이 부족합니다.",
+        "1백만원이 부족합니다.",
+    ],
+)
+def test_partially_parsed_korean_amount_is_rejected(risk_explanation: str) -> None:
+    payload = request_payload()
+    payload["actionCandidates"][0]["amount"] = 100_000_000
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=response_payload(riskExplanation=risk_explanation),
+        )
+
+    outcome = client_for(httpx.MockTransport(handler)).interpret(payload)
+
+    assert outcome.status == "FALLBACK"
+    assert outcome.error_code == "unknown_amount_claim"
+    assert outcome.attempt_count == 1
+
+
+def test_supplied_korean_date_is_not_treated_as_a_day_count() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=response_payload(userMessage="8월 3 일에 조치해 주세요."),
+        )
+
+    outcome = client_for(httpx.MockTransport(handler)).interpret(request_payload())
+
+    assert outcome.status == "SUCCEEDED"
+    assert outcome.error_code is None
+
+
+@pytest.mark.parametrize(
+    "user_message",
+    [
+        "2026. 8. 3.에 조치해 주세요.",
+        "2026/8/3에 조치해 주세요.",
+        "2026-8-3에 조치해 주세요.",
+    ],
+)
+def test_supplied_delimited_date_is_allowed(user_message: str) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=response_payload(userMessage=user_message),
+        )
+
+    outcome = client_for(httpx.MockTransport(handler)).interpret(request_payload())
+
+    assert outcome.status == "SUCCEEDED"
+    assert outcome.error_code is None
+
+
+def test_infeasible_candidate_amount_is_not_an_allowed_claim() -> None:
+    payload = request_payload()
+    payload["actionCandidates"].append(
+        {"actionId": "blocked-1", "type": "TRANSFER", "amount": 999_999, "feasible": False}
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=response_payload(riskExplanation="999,999원이 필요합니다."),
+        )
+
+    outcome = client_for(httpx.MockTransport(handler)).interpret(payload)
+
+    assert outcome.status == "FALLBACK"
+    assert outcome.error_code == "unknown_amount_claim"
+
+
+@pytest.mark.parametrize("field", ["counterparty_id", "candidate"])
+def test_identifier_date_fragment_is_not_an_allowed_claim(field: str) -> None:
+    payload = request_payload()
+    payload["evidence"] = [{field: "client-2027-01-01"}]
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=response_payload(userMessage="2027-01-01에 조치해 주세요."),
+        )
+
+    outcome = client_for(httpx.MockTransport(handler)).interpret(payload)
+
+    assert outcome.status == "FALLBACK"
+    assert outcome.error_code == "unknown_date_claim"
