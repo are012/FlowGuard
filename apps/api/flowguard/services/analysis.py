@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Event, Lock
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
+from flowguard.ai_contract import InvestigationActionType
 from flowguard.config import (
     AI_CONNECT_TIMEOUT_SECONDS,
     AI_CONTRACT_VERSION,
@@ -38,7 +39,8 @@ from flowguard.storage import (
 from .agent_trace import build_decision_trace
 from .analysis_support import AIInterpretationClient
 from .errors import ServiceError
-from .investigator import LiquidityInvestigator
+from .investigation_loop import InvestigationAIClient
+from .investigator import InvestigationMode, LiquidityInvestigator
 from .snapshots import SnapshotBuilder
 from .tools import CoreToolService
 
@@ -75,11 +77,22 @@ class AnalysisOrchestrator:
         tools: CoreToolService | None = None,
         investigator: LiquidityInvestigator | None = None,
         ai_client: AIInterpretationClient | None = None,
+        investigation_mode: InvestigationMode = "off",
+        investigation_client: InvestigationAIClient | None = None,
+        investigation_locale: str = AI_DEFAULT_LOCALE,
+        investigation_model_name: str | None = None,
     ) -> None:
         self.repository = repository
         self.snapshot_builder = snapshot_builder or SnapshotBuilder(repository)
         self.tools = tools or CoreToolService(repository)
-        self.investigator = investigator or LiquidityInvestigator(repository, self.tools)
+        self.investigator = investigator or LiquidityInvestigator(
+            repository,
+            self.tools,
+            investigation_mode=investigation_mode,
+            investigation_client=investigation_client,
+            investigation_locale=investigation_locale,
+            investigation_model_name=investigation_model_name,
+        )
         self.cashflow_service = CashflowAnalysisService(self.tools)
         self._in_flight_lock = Lock()
         self._in_flight: dict[tuple[str, str, str, object], _AnalysisInFlight] = {}
@@ -324,17 +337,43 @@ class AnalysisOrchestrator:
         )
 
         self._transition(analysis_id, "AGENT_INVESTIGATING")
+        investigation_start = snapshot.as_of.date()
+        investigation_horizon_days = int(baseline["analysis_horizon_days"])
         agent_state = self.investigator.investigate(
             analysis_id=analysis_id,
+            user_id=user_id,
             snapshot_id=snapshot.snapshot_id,
+            snapshot_revision=current_state_revision,
             baseline_result=baseline,
+            is_virtual=is_virtual,
+            investigation_targets={
+                "counterpartyIds": sorted(
+                    {receivable.counterparty_id for receivable in snapshot.receivables}
+                ),
+                "eventWindow": {
+                    "dateFrom": investigation_start.isoformat(),
+                    "dateTo": (
+                        investigation_start + timedelta(days=investigation_horizon_days - 1)
+                    ).isoformat(),
+                },
+                "actionTypes": [item.value for item in InvestigationActionType],
+            },
         )
         if "decision_trace" not in agent_state:
             agent_state["decision_trace"] = build_decision_trace(
                 agent_state,
-                mode=getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
-                model=getattr(self.investigator, "agent_model", None),
-                fallback_reason=getattr(self.investigator, "fallback_reason", None),
+                mode=agent_state.get(
+                    "decision_mode",
+                    getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
+                ),
+                model=agent_state.get(
+                    "decision_model",
+                    getattr(self.investigator, "agent_model", None),
+                ),
+                fallback_reason=agent_state.get(
+                    "decision_fallback_reason",
+                    getattr(self.investigator, "fallback_reason", None),
+                ),
             )
         self._transition(
             analysis_id,
@@ -398,12 +437,21 @@ class AnalysisOrchestrator:
                 "model_name": "flowguard-deterministic-core",
                 "model_version": baseline.get("model_version", FINANCIAL_CORE_VERSION),
                 "prompt_version": "rule-based-investigator-1",
-                "agent_mode": getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
-                "agent_model": getattr(self.investigator, "agent_model", None),
-                "agent_prompt_version": getattr(
-                    self.investigator,
-                    "prompt_version",
-                    "rule-based-investigator-1",
+                "agent_mode": agent_state.get(
+                    "decision_mode",
+                    getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
+                ),
+                "agent_model": agent_state.get(
+                    "decision_model",
+                    getattr(self.investigator, "agent_model", None),
+                ),
+                "agent_prompt_version": agent_state.get(
+                    "decision_prompt_version",
+                    getattr(
+                        self.investigator,
+                        "prompt_version",
+                        "rule-based-investigator-1",
+                    ),
                 ),
                 "tool_version": baseline.get("tool_version"),
                 "policy_version": POLICY_VERSION,

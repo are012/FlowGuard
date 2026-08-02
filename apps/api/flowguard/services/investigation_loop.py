@@ -403,10 +403,19 @@ class InvestigationLoop:
         remaining = deadline - self.clock()
         if remaining <= 0:
             return finish("FAILED", error_code="total_budget_exhausted")
-        plan_call = self.client.plan(
-            plan_payload,
-            timeout_seconds=min(PHASE_TIMEOUT, remaining),
-        )
+        try:
+            plan_call = self.client.plan(
+                plan_payload,
+                timeout_seconds=min(PHASE_TIMEOUT, remaining),
+            )
+        except Exception:
+            plan_call = AIInvestigationCallOutcome(
+                status="FAILED",
+                response_payload={},
+                attempt_count=0,
+                latency_ms=0,
+                error_code="unexpected_client_error",
+            )
         plan_response, plan_error = self._validate_plan_call(plan_request, plan_call)
         turns.append(
             self._turn(
@@ -584,10 +593,19 @@ class InvestigationLoop:
                 )
             )
             return "total_budget_exhausted"
-        call = self.client.conclude(
-            payload,
-            timeout_seconds=min(PHASE_TIMEOUT, remaining),
-        )
+        try:
+            call = self.client.conclude(
+                payload,
+                timeout_seconds=min(PHASE_TIMEOUT, remaining),
+            )
+        except Exception:
+            call = AIInvestigationCallOutcome(
+                status="FAILED",
+                response_payload={},
+                attempt_count=0,
+                latency_ms=0,
+                error_code="unexpected_client_error",
+            )
         response, validation_error = self._validate_conclude_call(request, call)
         turns.append(
             self._turn(

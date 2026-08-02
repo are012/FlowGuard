@@ -30,6 +30,11 @@ AI_CLASSIFICATION_SCHEMA_VERSION = "1.2"
 AI_CLASSIFICATION_CONTRACT_VERSION = "1.2"
 AI_CLASSIFICATION_PROMPT_VERSION = "classify-1"
 
+# Investigation is independently versioned from /interpret and label classification.
+AI_INVESTIGATION_SCHEMA_VERSION = "1.3"
+AI_INVESTIGATION_CONTRACT_VERSION = "1.3"
+AI_INVESTIGATION_PROMPT_VERSION = "invest-1"
+
 # SPECIFICATION.md section 27 leaves these values open. They are explicit and versioned here
 # so identical inputs remain reproducible until a future version deliberately changes them.
 MIN_COUNTERPARTY_HISTORY_COUNT = 3

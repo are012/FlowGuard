@@ -319,6 +319,52 @@ def test_second_turn_rejection_preserves_only_projected_observations() -> None:
     assert "secret_account_number" not in repr(outcome)
 
 
+def test_unexpected_plan_client_error_is_audited_as_failed() -> None:
+    class RaisingClient:
+        @staticmethod
+        def plan(
+            _payload: Mapping[str, Any],
+            *,
+            timeout_seconds: float,
+        ) -> AIInvestigationCallOutcome:
+            raise RuntimeError(f"unexpected plan failure after {timeout_seconds}")
+
+    outcome = InvestigationLoop(RaisingClient(), raw_result).run(plan_request())  # type: ignore[arg-type]
+
+    assert outcome.status == "FAILED"
+    assert outcome.error_code == "unexpected_client_error"
+    assert outcome.observations == ()
+    assert outcome.tool_call_count == 0
+    assert len(outcome.turns) == 1
+    assert outcome.turns[0].status == "FAILED"
+    assert outcome.turns[0].error_code == "unexpected_client_error"
+
+
+def test_unexpected_conclude_client_error_preserves_projected_observations() -> None:
+    class RaisingClient(ScriptedClient):
+        def conclude(
+            self,
+            payload: Mapping[str, Any],
+            *,
+            timeout_seconds: float,
+        ) -> AIInvestigationCallOutcome:
+            self.calls.append(("conclude", deepcopy(dict(payload)), timeout_seconds))
+            raise RuntimeError("unexpected conclude failure")
+
+    client = RaisingClient(plan_result={"investigations": [investigation()]})
+
+    outcome = InvestigationLoop(client, raw_result).run(plan_request())
+
+    assert outcome.status == "PARTIAL"
+    assert outcome.error_code == "unexpected_client_error"
+    assert len(outcome.observations) == 1
+    assert outcome.tool_call_count == 1
+    assert len(outcome.turns) == 2
+    assert outcome.turns[-1].status == "FAILED"
+    assert outcome.turns[-1].error_code == "unexpected_client_error"
+    assert "secret_account_number" not in repr(outcome)
+
+
 def test_duplicate_additional_investigation_is_rejected_by_the_loop() -> None:
     client = ScriptedClient(
         plan_result={"investigations": [investigation()]},
