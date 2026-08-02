@@ -7,7 +7,16 @@ from datetime import datetime
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    Response,
+    UploadFile,
+    status,
+)
 
 from flowguard.config import DEMO_ANALYSIS_AS_OF
 from flowguard.services.analysis import AnalysisOrchestrator
@@ -409,9 +418,48 @@ def installment_precheck(
     )
 
 
+def analysis_runs_in_background() -> bool:
+    """분석을 요청 밖에서 실행할지 여부.
+
+    조사 루프를 켜면 분석이 10초를 넘길 수 있어 요청 하나가 그만큼
+    점유된다. 비동기로 두면 즉시 반환하고 `GET /analyses/{id}` 폴링으로
+    진행 상황을 확인한다. 기본값은 기존 동기 동작이다.
+    """
+
+    return os.getenv("FLOWGUARD_ANALYSIS_ASYNC", "off").strip().lower() in {
+        "1",
+        "on",
+        "true",
+    }
+
+
 @api.post("/analyses", status_code=status.HTTP_201_CREATED)
-def create_analysis(body: AnalysisRequest, user_id: UserId, analyses: Analyses) -> dict[str, Any]:
-    return analyses.run(user_id, trigger_type=body.trigger_type, as_of=body.as_of)
+def create_analysis(
+    body: AnalysisRequest,
+    user_id: UserId,
+    analyses: Analyses,
+    background: BackgroundTasks,
+    response: Response,
+) -> dict[str, Any]:
+    if not analysis_runs_in_background():
+        return analyses.run(user_id, trigger_type=body.trigger_type, as_of=body.as_of)
+
+    # 기존 run() 을 그대로 요청 밖에서 실행한다. 중복 요청 합치기와
+    # 상태 저장은 run() 안에 이미 있으므로 서비스는 손대지 않는다.
+    background.add_task(
+        analyses.run,
+        user_id,
+        trigger_type=body.trigger_type,
+        as_of=body.as_of,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED
+    return {
+        "status": "QUEUED",
+        "analysis_status": "QUEUED",
+        "analysis_required": True,
+        "revision": analyses.repository.current_state_revision(user_id),
+        "message": "분석을 시작했습니다. 진행 상황은 대시보드에서 확인할 수 있습니다.",
+    }
 
 
 @api.get("/analyses/{analysis_id}")
