@@ -24,7 +24,14 @@ import {
   recommendationActions,
   statusLabel,
 } from "@/lib/format";
-import type { DashboardResponse, SafeToSpend } from "@/lib/types";
+import type {
+  AnalysisExecutionStage,
+  AnalysisStatus,
+  DashboardResponse,
+  InterpretationPayload,
+  InterpretationStatus,
+  SafeToSpend,
+} from "@/lib/types";
 
 function safeToSpendValue(value?: SafeToSpend | number | null) {
   if (typeof value === "number") return value;
@@ -35,11 +42,61 @@ function safeToSpendDetails(value?: SafeToSpend | number | null) {
   return typeof value === "object" && value ? value : undefined;
 }
 
-function agentModeLabel(mode?: string) {
-  if (mode === "LUNA") return "GPT-5.6 Luna";
-  if (mode === "LUNA_NOT_REQUIRED") return "Luna · 대응 불필요";
-  if (mode === "DETERMINISTIC_FALLBACK") return "결정론적 폴백";
-  return "결정론적 조사";
+const analysisStatusLabels: Record<AnalysisStatus, string> = {
+  QUEUED: "분석 대기 중",
+  RUNNING: "금융 분석 중",
+  SUCCEEDED: "금융 분석 완료",
+  FAILED: "금융 분석 실패",
+  SUPERSEDED: "최신 분석으로 대체됨",
+};
+
+const interpretationStatusLabels: Record<InterpretationStatus, string> = {
+  NOT_REQUESTED: "요청 안 함",
+  QUEUED: "설명 대기 중",
+  RUNNING: "설명 생성 중",
+  SUCCEEDED: "AI 설명 완료",
+  FALLBACK: "규칙 기반 설명",
+  FAILED: "설명 생성 실패",
+  STALE: "이전 데이터 기준",
+};
+
+const executionStageLabels: Record<AnalysisExecutionStage, string> = {
+  QUEUED: "작업 대기",
+  SNAPSHOT_BUILDING: "금융 스냅숏 생성",
+  BASELINE_ANALYZING: "기준 현금흐름 계산",
+  AGENT_INVESTIGATING: "위험 근거 조사",
+  PLAN_EVALUATING: "대응안 검증",
+  REPORT_BUILDING: "리포트 생성",
+  INTERPRETATION_REQUESTING: "AI 설명 요청",
+  INTERPRETATION_VALIDATING: "AI 설명 검증",
+  COMPLETED: "완료",
+  FAILED: "실패",
+};
+
+function interpretationSummary(
+  status?: InterpretationStatus,
+  interpretation?: InterpretationPayload | null,
+) {
+  if (interpretation?.userMessage) return interpretation.userMessage;
+  if (status === "SUCCEEDED") {
+    return "별도 AI 해석 서비스가 검증된 금융 결과를 사용자용 설명으로 정리했습니다.";
+  }
+  if (status === "FALLBACK") {
+    return "AI 해석 대신 백엔드의 규칙 기반 설명을 사용했습니다. 금융 계산과 추천 검증 결과는 그대로 유지됩니다.";
+  }
+  if (status === "FAILED") {
+    return "AI 해석을 완료하지 못했지만 금융 계산과 검증된 추천 결과는 유지됩니다.";
+  }
+  if (status === "STALE") {
+    return "이 설명은 이전 금융 데이터 기준이므로 최신 리포트로 승격되지 않았습니다.";
+  }
+  if (status === "NOT_REQUESTED") {
+    return "현재 결과는 별도 AI 설명 없이 결정론적 금융 분석만으로 제공됩니다.";
+  }
+  if (status === "QUEUED" || status === "RUNNING") {
+    return "금융 분석 결과는 준비되었으며 별도 AI 설명을 생성하고 있습니다.";
+  }
+  return "AI 해석 상태를 확인하고 있습니다.";
 }
 
 function traceKindLabel(kind: string) {
@@ -107,6 +164,16 @@ export default function DashboardPage() {
   const staleCount = data.data_quality?.stale_sources?.length || 0;
   const unconfirmedCount = data.data_quality?.unconfirmed_items?.length || 0;
   const decisionTrace = data.decision_trace || undefined;
+  const refreshStatus = data.refresh_status || data.analysis_status;
+  const reportIsStale = data.is_stale ?? data.analysis_required ?? false;
+  const reportRevision = data.report_revision || data.analysis_revision;
+  const latestDataRevision = data.latest_data_revision || data.revision;
+  const analysisStatusText = data.analysis_status
+    ? analysisStatusLabels[data.analysis_status]
+    : "금융 분석 상태 정보 없음";
+  const interpretationStatusText = data.interpretation_status
+    ? interpretationStatusLabels[data.interpretation_status]
+    : "상태 정보 없음";
 
   if (
     typeof safeAmount !== "number" &&
@@ -142,11 +209,20 @@ export default function DashboardPage() {
         }
       />
 
-      {data.analysis_required && (
-        <SubmitNotice kind="info">
-          금융정보가 최근 분석 이후 변경되었습니다.{" "}
+      {reportIsStale && (
+        <SubmitNotice kind={refreshStatus === "FAILED" ? "error" : "info"}>
+          {refreshStatus === "RUNNING" || refreshStatus === "QUEUED"
+            ? "새로운 금융정보를 반영하고 있습니다. 현재는 마지막으로 완료된 분석을 보여드립니다."
+            : refreshStatus === "FAILED"
+              ? "새 금융정보 분석을 완료하지 못해 마지막 성공 결과를 보여드립니다."
+              : "금융정보가 최근 분석 이후 변경되어 마지막 성공 결과를 보여드립니다."}{" "}
+          {reportRevision && latestDataRevision && (
+            <>
+              리포트 {reportRevision} · 최신 데이터 {latestDataRevision}.{" "}
+            </>
+          )}
           <Link className="inline-link" href="/setup">
-            데이터를 다시 확인하고 분석하기
+            데이터 확인하고 다시 분석하기
           </Link>
         </SubmitNotice>
       )}
@@ -237,44 +313,42 @@ export default function DashboardPage() {
         </article>
       </section>
 
-      {decisionTrace && (
-        <section className="agent-trace" aria-labelledby="agent-trace-title">
-          <div className="agent-trace-header">
-            <div>
-              <p className="card-kicker">검증 가능한 에이전트 판단</p>
-              <h2 id="agent-trace-title">위험에서 추천까지 확인한 과정</h2>
-              <p>
-                {decisionTrace.mode === "LUNA"
-                  ? "Luna가 선택한 근거와 금융 코어의 검증 결과만 공개합니다."
-                  : "결정론적 조사기가 확인한 근거와 금융 코어의 검증 결과를 공개합니다."}{" "}
-                숨겨진 모델 추론은 표시하지 않습니다.
-              </p>
-            </div>
-            <div className="agent-mode">
-              <span className={decisionTrace.mode === "LUNA" ? "is-luna" : ""}>
-                {agentModeLabel(decisionTrace.mode)}
-              </span>
-              {decisionTrace.model && (
-                <small>
-                  {decisionTrace.mode === "LUNA"
-                    ? decisionTrace.model
-                    : `연결 대상 · ${decisionTrace.model}`}
-                </small>
-              )}
-            </div>
+      <section className="agent-trace" aria-labelledby="agent-trace-title">
+        <div className="agent-trace-header">
+          <div>
+            <p className="card-kicker">검증 가능한 백엔드 판단</p>
+            <h2 id="agent-trace-title">위험에서 추천까지 확인한 과정</h2>
+            <p>
+              금액·날짜·위험과 대응안은 결정론적 금융 코어와 백엔드 추천
+              빌더가 계산하고 검증합니다. 별도 AI 서비스는 검증된 결과의
+              설명만 담당합니다.
+            </p>
           </div>
+          <div className="agent-mode">
+            <span>결정론적 금융 분석</span>
+            <small>{analysisStatusText}</small>
+          </div>
+        </div>
 
-          {decisionTrace.fallback_reason && (
-            <div className="agent-fallback">
-              <Icon name="info" size={17} />
-              <span>
-                {decisionTrace.fallback_reason === "OPENAI_API_KEY_NOT_CONFIGURED"
-                  ? "API 키가 없어 기존 결정론적 조사기로 안전하게 분석했습니다."
-                  : "Luna 호출을 완료하지 못해 기존 결정론적 조사기로 안전하게 분석했습니다."}
-              </span>
-            </div>
-          )}
+        <div
+          className={`agent-interpretation interpretation-${
+            data.interpretation_status?.toLowerCase() || "unknown"
+          }`}
+        >
+          <Icon
+            name={data.interpretation_status === "SUCCEEDED" ? "check" : "info"}
+            size={17}
+          />
+          <span>
+            <strong>AI 해석 · {interpretationStatusText}</strong>{" "}
+            {interpretationSummary(
+              data.interpretation_status,
+              data.interpretation,
+            )}
+          </span>
+        </div>
 
+        {decisionTrace?.steps.length ? (
           <ol className="agent-trace-list">
             {decisionTrace.steps.map((step) => (
               <li key={`${step.sequence}-${step.kind}-${step.candidate_id || ""}`}>
@@ -303,13 +377,15 @@ export default function DashboardPage() {
               </li>
             ))}
           </ol>
+        ) : null}
 
+        {decisionTrace?.disclosure && (
           <p className="agent-disclosure">
             <Icon name="shield" size={16} />
             {decisionTrace.disclosure}
           </p>
-        </section>
-      )}
+        )}
+      </section>
 
       <section className="analysis-strip" aria-label="분석 정보">
         <DataFact
@@ -322,7 +398,11 @@ export default function DashboardPage() {
           icon="refresh"
           label="최근 분석"
           value={formatDateTime(updatedAt)}
-          detail={data.analysis_status ? `상태 · ${data.analysis_status}` : undefined}
+          detail={
+            data.execution_stage
+              ? `${analysisStatusText} · ${executionStageLabels[data.execution_stage]}`
+              : analysisStatusText
+          }
         />
         <DataFact
           icon="info"

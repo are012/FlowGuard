@@ -8,8 +8,6 @@ from fastapi.testclient import TestClient
 
 from flowguard.main import create_app
 from flowguard.services.investigator import LiquidityInvestigator, RiskEvidenceBuilder
-from flowguard.services.luna import LunaDecision, LunaLiquidityInvestigator
-from flowguard.services.tools import CoreToolService
 from flowguard.storage import FlowGuardRepository, RecordNotFound
 
 AS_OF = "2026-07-24T09:00:00+09:00"
@@ -234,6 +232,32 @@ def test_recommendation_contains_derivation_and_comparison() -> None:
     assert all("policy_violations" in item for item in comparisons)
 
 
+def test_unexpected_ai_failure_does_not_fail_financial_analysis() -> None:
+    class FailingAIClient:
+        @staticmethod
+        def interpret(_payload: dict[str, Any]) -> None:
+            raise RuntimeError("AI service failed")
+
+    repository = FlowGuardRepository("sqlite:///:memory:")
+    app = create_app(repository)
+    app.state.analysis_service.ai_client = FailingAIClient()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _payment_risk(client)
+
+    analysis = repository.latest_analysis("demo-user")
+    assert analysis is not None
+    assert analysis["analysis_status"] == "SUCCEEDED"
+    assert analysis["interpretation_status"] == "FAILED"
+    assert repository.latest_report("demo-user")["analysis_id"] == analysis["analysis_id"]
+    interpretation = repository.latest_interpretation_run(analysis["analysis_id"])
+    assert interpretation is not None
+    assert interpretation["status"] == "FAILED"
+    assert interpretation["error_code"] == "interpretation_internal_error"
+    assert [event["status"] for event in repository.list_analysis_events(analysis["analysis_id"])][
+        -2:
+    ] == ["INTERPRETATION_REQUESTING", "COMPLETED"]
+
+
 def test_counterparty_evidence_is_deduplicated() -> None:
     class StubTools:
         calls = 0
@@ -296,30 +320,3 @@ def test_unexpected_tool_exception_is_audited() -> None:
     assert len(audit) == 1
     assert audit[0]["error"]["code"] == "TOOL_EXECUTION_FAILED"
     assert audit[0]["error"]["details"]["exception_type"] == "ValueError"
-
-
-def test_luna_does_not_evaluate_an_unverified_final_selection() -> None:
-    repository = FlowGuardRepository("sqlite:///:memory:")
-    investigator = LunaLiquidityInvestigator(
-        repository,
-        CoreToolService(repository),
-        client=object(),
-    )
-    decision = LunaDecision(
-        risk_hypotheses=[],
-        selected_candidate_id="not-evaluated",
-        alternative_candidate_ids=[],
-        recommendation_summary="summary",
-        selection_reason="reason",
-        evidence_summary=[],
-        unresolved_questions=[],
-    )
-    safe = {"action_id": "safe", "feasible": True}
-
-    selected = investigator._validated_selection(
-        decision,
-        candidates={"not-evaluated": {"action_id": "not-evaluated"}},
-        evaluated={"safe": safe},
-    )
-
-    assert selected == safe

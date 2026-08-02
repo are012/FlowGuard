@@ -1,4 +1,4 @@
-# FlowGuard AI 최종 아키텍처 완성본
+# FlowGuard AI 목표 아키텍처와 MVP 실행 프로필
 
 FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱신되면 종합 분석을 다시 수행하고, 저장된 최신 결과를 여러 화면에 나누어 보여주는 구조**로 설계합니다.
 
@@ -11,9 +11,33 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 → 대시보드·위험카드·추천안 갱신
 ```
 
+## 0. 문서 범위와 현재 실행 프로필
+
+이 문서는 도메인 책임을 설명하는 논리 아키텍처와 운영 확장 목표를 함께 다룹니다.
+상자나 컴포넌트 이름이 항상 현재의 독립 프로세스나 컨테이너를 뜻하지는 않습니다.
+
+| 구성 | 현재 공모전 MVP 구현 | 목표 확장 |
+|---|---|---|
+| Web | Next.js 프로세스 | `flowguard-web` 컨테이너 |
+| API/분석 | FastAPI 요청 안에서 동기 분석 | API와 durable worker 분리 |
+| AI 해석 | 같은 Python distribution의 별도 FastAPI 진입점, 단일 worker | 공유 멱등 저장소 기반 다중 worker 서비스 |
+| 코어/MCP 도구 | 일곱 도구와 FastMCP 진입점 구현; 분석 경로는 동일 구현을 in-process 호출 | 별도 MCP 프로세스와 transport |
+| 저장소 | SQLite 기본·테스트 완료; PostgreSQL 설정 경로 제공 | 검증된 PostgreSQL 배포와 마이그레이션 |
+| 큐/스케줄러 | 없음 | Redis queue, lease, 정기 실행 |
+| Docker | Dockerfile·Compose 없음 | 11절의 목표 토폴로지 |
+
+자동 검증은 SQLite, Fake OpenAI client와 MockTransport를 사용하며 E2E에서는 AI
+연결 실패 시 결정론적 폴백을 확인합니다. 실제 OpenAI 호출, API와 AI 프로세스 사이의
+성공 경로, PostgreSQL, Redis, Docker 토폴로지와 프로세스 간 MCP transport는 아직
+통합 검증하지 않았습니다.
+
 ---
 
 ## 1. 전체 아키텍처
+
+아래 그림은 책임과 데이터 흐름을 나타내는 **논리 컴포넌트 그림**입니다. 현재 MVP의
+프로세스 배치는 위 표를 기준으로 하며, PostgreSQL·별도 worker·별도 MCP 서버는 목표
+확장 구성입니다.
 
 ```text
 ┌───────────────────────────────────────────────────────────────┐
@@ -32,11 +56,12 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 └──────────────────────────────┬────────────────────────────────┘
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
-│                        PostgreSQL                             │
+│               Persistence (MVP: SQLite)                      │
 │                                                               │
 │  계좌 · 카드 · 거래 · 할부 · 예정수입 · 사용자 설정           │
+│  운영 확장 목표: PostgreSQL                                   │
 └──────────────────────────────┬────────────────────────────────┘
-                               │ 데이터 갱신 이벤트
+                               │ 분석 요청 (MVP: API 호출)
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
 │                    Analysis Orchestrator                      │
@@ -72,17 +97,18 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 │  거래처 지급이력 확인 · 위험 가설 수립                        │
 │  후보 대응안 구성 · 결과 재검토                               │
 │                                                               │
-│  ※ 백엔드 worker 소유                                         │
+│  ※ MVP: API 프로세스 · 확장 목표: backend worker              │
 │  ※ 숫자를 직접 계산하지 않음                                 │
 └──────────────────────────────┬────────────────────────────────┘
-                               │ MCP 호출
+                               │ 코어 도구 호출 (MCP 계약)
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
-│                  FlowGuard Core MCP Server                    │
+│              FlowGuard Core Tool / MCP Boundary               │
 │                                                               │
 │  금융 컨텍스트 조회 · 거래처 근거 조회                        │
 │  금융 이벤트 조회 · 현금흐름 계산                             │
 │  Safe-to-Spend 계산 · 대응안 평가 · 정책 검증                 │
+│  MVP: in-process 호출 · 확장 목표: 별도 MCP transport         │
 └──────────────────────────────┬────────────────────────────────┘
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
@@ -257,7 +283,8 @@ MVP에서는 가상 적용
 ## Backend Recommendation Builder
 
 계산 결과를 바탕으로 무엇을 추가로 확인하고 어떤 대응안을 검토할지 결정합니다.
-이 구성요소는 `flowguard-worker` 안의 백엔드 책임이며 별도 AI 서비스가 아닙니다.
+이 구성요소는 백엔드 분석 책임이며 별도 AI 서비스가 아닙니다. 현재 MVP에서는
+API 프로세스 안에서 실행하고 운영 확장 시 `flowguard-worker`로 분리합니다.
 
 * 주요 위험 원인 가설 생성
 * 필요한 거래처 지급 근거 조회
@@ -278,20 +305,29 @@ Safe-to-Spend
 대응안 적용 결과
 ```
 
-### MVP 실행 프로필
+### 현재 MVP 실행 프로필
 
-공모전 MVP의 최종 배포 구조는 **백엔드 worker + 별도 AI Interpretation Service**
-입니다.
+공모전 MVP는 `flowguard-api` 요청 안에서 스냅숏 생성, 금융 코어 계산, 위험 조사,
+후보 대응안 생성, 정책 검증과 상태 저장을 동기 실행합니다. 이 문서의
+`flowguard-worker`는 현재 별도 프로세스가 아니라 이 백엔드 책임을 뜻합니다.
 
-- `flowguard-worker`는 스냅숏 생성, 금융 코어 계산, 위험 조사, 후보 대응안 생성,
-  정책 검증, 상태 저장을 담당합니다.
-- `flowguard-mcp`와 코어 도구는 백엔드 소유입니다.
+- 코어 도구와 FastMCP 진입점은 백엔드가 소유합니다. 현재 분석 경로는
+  `CoreToolService`를 in-process로 호출합니다.
+- AI Interpretation Service는 같은 Python distribution을 사용하지만 포트와
+  환경변수가 분리된 별도 FastAPI 프로세스로 실행합니다.
 - AI 서비스는 백엔드가 전달한 `facts`, `evidence`, `actionCandidates`만 받아
   OpenAI를 호출하고 순위화·설명 생성만 수행합니다.
-- OpenAI API 키는 AI 서비스에만 둡니다.
-- AI 서비스는 DB에 직접 접근하지 않으며, MVP에서는 MCP를 직접 호출하지 않습니다.
+- OpenAI API 키는 AI 서비스 프로세스만 읽습니다.
+- AI 서비스는 DB나 MCP 도구에 접근하지 않습니다.
+- SQLite가 기본 저장소이며 Redis queue와 정기 scheduler는 사용하지 않습니다.
 
-따라서 모델은 금액·날짜·확률을 직접 계산하지 않으며, 금융 코어가 가상 적용과 정책
+### 운영 확장 프로필
+
+부하 분산과 durable recovery가 필요해지면 API에서 `flowguard-worker`를 분리하고,
+`flowguard-mcp`, PostgreSQL, Redis와 공유 멱등 저장소를 독립 배포합니다. 이 구성은
+현재 저장소에서 통합 검증된 MVP 배포가 아니라 11절의 목표 토폴로지입니다.
+
+따라서 모델은 금액·날짜·일수·비율·확률을 직접 계산하지 않으며, 금융 코어가 가상 적용과 정책
 검증을 마친 후보만 최종 추천으로 사용할 수 있습니다. 화면에는 숨은 사고과정이
 아니라 위험 가설, 실제 도구 호출, 후보 검증 결과, 최종 선택 이유로 구성된 공개
 감사 추적만 표시합니다.
@@ -602,7 +638,11 @@ POST /api/v1/recommendations/{recommendation_id}/alternatives
 
 ---
 
-# 9. 데이터베이스 핵심 테이블
+# 9. 목표 PostgreSQL 논리 데이터 모델
+
+아래 목록은 운영 확장 시 정규화할 논리 데이터 모델입니다. 현재 MVP는 SQLite와
+SQLAlchemy를 사용하며 일부 실행 산출물을 JSON payload로 저장합니다. 현재 실제
+테이블과 제약은 `apps/api/flowguard/storage.py`가 기준입니다.
 
 ```text
 users
@@ -655,24 +695,27 @@ created_at
 
 ---
 
-# 10. 백그라운드 작업
+# 10. 분석 실행과 목표 백그라운드 작업
 
-MVP에서는 복잡한 ‘의미 있는 변화 판정기’를 두지 않습니다.
+현재 MVP에서는 복잡한 ‘의미 있는 변화 판정기’, queue 또는 scheduler를 두지
+않습니다. 데이터 변경 응답이 `analysis_required=true`를 반환하면 클라이언트가 분석
+API를 호출하고, API 요청 안에서 분석을 동기 실행합니다.
 
 ```text
 CSV 업로드
 또는 사용자가 금융정보 수정
         ↓
-분석 작업 큐 등록
+analysis_required = true
         ↓
-새 금융 스냅숏 생성
+POST /api/v1/analyses
         ↓
-FlowGuard 종합 분석
+API 요청 안에서 스냅숏 생성·종합 분석
         ↓
-최신 리포트 교체
+revision이 최신인 리포트만 승격
 ```
 
-추가로 하루 한 번 정기 분석을 실행할 수 있습니다.
+운영 확장 단계에서는 durable worker queue와 하루 한 번의 정기 분석을 추가할 수
+있습니다.
 
 ```text
 매일 지정 시간
@@ -688,7 +731,13 @@ FlowGuard 종합 분석
 
 ---
 
-# 11. Docker 구성
+# 11. 목표 확장용 Docker 토폴로지
+
+> 아래 일곱 컨테이너는 현재 저장소에서 실행·검증된 배포 구성이 아니라 운영 확장을
+> 위한 목표안입니다. 현재 MVP에는 Dockerfile과 Compose가 없으며, 구현된 로컬 실행
+> 구성은 Web, 동기 분석과 코어 도구를 포함한 API, 선택적 AI Interpretation Service와
+> SQLite입니다. 자동 검증 경계는 0절을 따르며 Docker 사용 여부와 배포 방식은
+> `SPECIFICATION.md` 27절의 Open Decision으로 유지합니다.
 
 ```text
 flowguard-web
@@ -700,9 +749,9 @@ flowguard-postgres
 flowguard-redis
 ```
 
-각 컨테이너의 역할은 다음과 같습니다.
+각 목표 컴포넌트의 역할은 다음과 같습니다.
 
-| 컨테이너                 | 역할                    |
+| 목표 컴포넌트             | 역할                    |
 | -------------------- | --------------------- |
 | `flowguard-web`      | Next.js 사용자 화면        |
 | `flowguard-api`      | FastAPI, 조회·수정·승인 API |
@@ -714,7 +763,33 @@ flowguard-redis
 
 ---
 
-# 12. 최종 실행 구조
+# 12. 현재 MVP와 목표 확장 실행 구조
+
+## 현재 MVP
+
+```text
+합성 CSV·사용자 입력
+        ↓
+FlowGuard Web App
+        ↓
+Application API
+  ├─ SQLite
+  ├─ 동기 Analysis Orchestrator
+  ├─ Deterministic Financial Core
+  └─ in-process CoreToolService
+        ↓
+기준 분석 리포트 저장 (SQLite)
+        ↓
+선택적 AI Interpretation Service (별도 프로세스·단일 worker)
+        ↓
+해석 실행 기록 저장
+        ↓
+최신 revision만 latest report로 승격
+        ↓
+FlowGuard Web App에서 저장된 결과 조회
+```
+
+## 목표 운영 확장
 
 ```text
 MyData API 또는 MVP용 CSV

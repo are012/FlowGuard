@@ -15,6 +15,15 @@ DEFAULT_SIMULATION_SEED = 42
 DEFAULT_PROTECTION_LEVEL = 0.90
 DEMO_ANALYSIS_AS_OF = "2026-07-24T09:00:00+09:00"
 
+AI_SCHEMA_VERSION = "1.1"
+AI_CONTRACT_VERSION = "1.1"
+AI_PROMPT_VERSION = "3"
+AI_DEFAULT_LOCALE = "ko-KR"
+AI_CONNECT_TIMEOUT_SECONDS = 3.0
+AI_RESPONSE_TIMEOUT_SECONDS = 10.0
+AI_TOTAL_TIMEOUT_SECONDS = 15.0
+AI_MAX_RETRIES = 1
+
 # SPECIFICATION.md section 27 leaves these values open. They are explicit and versioned here
 # so identical inputs remain reproducible until a future version deliberately changes them.
 MIN_COUNTERPARTY_HISTORY_COUNT = 3

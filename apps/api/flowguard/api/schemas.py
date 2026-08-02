@@ -14,57 +14,12 @@ from pydantic import (
     model_validator,
 )
 
+from flowguard.ai_contract import AIToBackendResponse as AIToBackendResponse
+from flowguard.ai_contract import BackendToAIRequest as BackendToAIRequest
+
 
 class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-class AIActionCandidateRef(StrictRequest):
-    actionId: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
-    priority: Annotated[int, Field(strict=True, ge=1, le=10)]
-    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
-
-
-class NextRiskPayload(StrictRequest):
-    type: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
-    date: date
-    shortageAmount: int
-
-
-class CashflowSummaryPayload(StrictRequest):
-    lowestBalance: int
-    lowestBalanceDate: date
-
-
-class FactsPayload(StrictRequest):
-    safeToSpend: int
-    nextRisk: NextRiskPayload
-    cashflowSummary: CashflowSummaryPayload
-
-
-class AIToBackendResponse(StrictRequest):
-    schemaVersion: Literal["1.0"] = "1.0"
-    analysisId: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
-    ]
-    riskExplanation: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
-    ]
-    rankedActions: list[AIActionCandidateRef] = Field(default_factory=list)
-    userMessage: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
-    ]
-
-
-class BackendToAIRequest(StrictRequest):
-    schemaVersion: Literal["1.0"] = "1.0"
-    analysisId: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
-    ]
-    calculatedAt: AwareDatetime
-    facts: FactsPayload
-    evidence: list[dict] = Field(default_factory=list)
-    actionCandidates: list[dict] = Field(default_factory=list)
 
 
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]

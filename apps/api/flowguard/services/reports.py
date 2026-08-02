@@ -28,18 +28,36 @@ class ReportQueryService:
                 http_status=404,
             ) from exc
         latest_run = self.repository.latest_analysis(user_id)
+        report_run = self.repository.get_analysis(report["analysis_id"])
+        interpretation_run = self.repository.latest_interpretation_run(report["analysis_id"])
         revision = self.repository.current_state_revision(user_id)
-        analysis_revision = report.get("current_state_revision")
+        report_revision = report.get("current_state_revision")
+        is_stale = report_revision != revision
+        interpretation_status = (
+            interpretation_run["status"]
+            if interpretation_run is not None
+            else report_run["interpretation_status"]
+        )
+        interpretation = self._public_interpretation(interpretation_run)
         return {
             **report,
-            "refresh_status": latest_run["status"] if latest_run else "COMPLETED",
-            "analysis_status": latest_run["status"] if latest_run else "COMPLETED",
+            "refresh_status": latest_run["analysis_status"] if latest_run else "SUCCEEDED",
+            "analysis_status": report_run["analysis_status"],
+            "interpretation_status": interpretation_status,
+            "execution_stage": latest_run["execution_stage"] if latest_run else "COMPLETED",
+            "interpretation": interpretation,
             "last_successful_analysis_at": report["created_at"],
             "revision": revision,
-            "analysis_revision": analysis_revision,
+            "analysis_revision": report_revision,
+            "report_revision": report_revision,
+            "latest_data_revision": revision,
+            "is_stale": is_stale,
             "analysis_required": (
-                analysis_revision != revision
-                or (latest_run is not None and latest_run["status"] != "COMPLETED")
+                is_stale
+                or (
+                    latest_run is not None
+                    and latest_run["analysis_status"] not in {"SUCCEEDED", "SUPERSEDED"}
+                )
             ),
         }
 
@@ -68,12 +86,28 @@ class ReportQueryService:
             "decision_trace": report.get("agent", {}).get("decision_trace"),
             "data_quality": report["data_quality"],
             "analysis_status": report["analysis_status"],
+            "interpretation_status": report["interpretation_status"],
+            "execution_stage": report["execution_stage"],
+            "interpretation": report["interpretation"],
             "refresh_status": report["refresh_status"],
             "last_successful_analysis_at": report["last_successful_analysis_at"],
             "is_virtual": report.get("is_virtual", False),
             "revision": report["revision"],
             "analysis_revision": report["analysis_revision"],
+            "report_revision": report["report_revision"],
+            "latest_data_revision": report["latest_data_revision"],
+            "is_stale": report["is_stale"],
             "analysis_required": report["analysis_required"],
+        }
+
+    @staticmethod
+    def _public_interpretation(run: dict[str, Any] | None) -> dict[str, Any] | None:
+        if run is None or run.get("response_payload") is None:
+            return None
+        return {
+            **run["response_payload"],
+            "source": "DETERMINISTIC_FALLBACK" if run["fallback_used"] else "AI",
+            "fallbackReason": run.get("error_code"),
         }
 
     def cashflow_timeline(self, user_id: str) -> dict[str, Any]:

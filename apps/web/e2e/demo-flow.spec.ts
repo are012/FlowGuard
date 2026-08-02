@@ -1,6 +1,8 @@
 import { expect, test, type Request } from "@playwright/test";
 import path from "node:path";
 
+import type { AnalysisStatus, InterpretationStatus } from "../src/lib/types";
+
 const API_URL = "http://127.0.0.1:8100";
 const DEMO_AS_OF = "2026-07-24T09:00:00+09:00";
 const SAMPLE_CSV = path.resolve(
@@ -74,6 +76,8 @@ test("sample data completes the safe virtual recommendation demo", async ({
 
   await page.getByTestId("setup-analyze").click();
   await expect(page.locator(".setup-complete")).toBeVisible();
+  await expect(page.locator(".analysis-request-info")).toContainText("SUCCEEDED");
+  await expect(page.locator(".analysis-request-info")).toContainText("FALLBACK");
 
   const setupCommitRequests = analysisRequests.filter(
     (candidate) => new URL(candidate.url()).pathname === "/api/v1/setup/commit",
@@ -87,6 +91,31 @@ test("sample data completes the safe virtual recommendation demo", async ({
 
   await page.locator('.setup-complete a[href="/"]').click();
   await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByText("결정론적 금융 분석", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("AI 해석 · 규칙 기반 설명", { exact: true }),
+  ).toBeVisible();
+
+  const dashboardResponse = await request.get(`${API_URL}/api/v1/dashboard`);
+  expect(dashboardResponse.ok()).toBe(true);
+  const dashboard = (await dashboardResponse.json()) as {
+    analysis_status?: AnalysisStatus;
+    interpretation_status?: InterpretationStatus;
+    execution_stage?: string;
+    report_revision?: string;
+    latest_data_revision?: string;
+    is_stale?: boolean;
+    refresh_status?: AnalysisStatus;
+    interpretation?: { source?: string } | null;
+  };
+  expect(dashboard.analysis_status).toBe("SUCCEEDED");
+  expect(dashboard.interpretation_status).toBe("FALLBACK");
+  expect(dashboard.execution_stage).toBe("COMPLETED");
+  expect(dashboard.report_revision).toBe(dashboard.latest_data_revision);
+  expect(dashboard.is_stale).toBe(false);
+  expect(dashboard.refresh_status).toBe("SUCCEEDED");
+  expect(dashboard.interpretation?.source).toBe("DETERMINISTIC_FALLBACK");
+
   await page.locator('a[href="/recommendations"]').first().click();
   await expect(page).toHaveURL(/\/recommendations$/);
 
@@ -111,11 +140,15 @@ test("sample data completes the safe virtual recommendation demo", async ({
   expect(approvalResponse.ok()).toBe(true);
   const approval = (await approvalResponse.json()) as {
     virtual_application?: { external_actions_executed?: boolean };
-    virtual_analysis?: { status?: string };
+    virtual_analysis?: {
+      status?: string;
+      analysis_status?: AnalysisStatus;
+      interpretation_status?: InterpretationStatus;
+    };
     virtual_report?: { is_virtual?: boolean };
   };
   expect(approval.virtual_application?.external_actions_executed).toBe(false);
-  expect(approval.virtual_analysis?.status).toBe("COMPLETED");
+  expect(approval.virtual_analysis?.analysis_status).toBe("SUCCEEDED");
   expect(approval.virtual_report?.is_virtual).toBe(true);
 
   const accountsAfterResponse = await request.get(`${API_URL}/api/v1/accounts`);
