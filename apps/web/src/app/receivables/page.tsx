@@ -396,7 +396,7 @@ export default function ReceivablesPage() {
                         </strong>
                       </span>
                       <span>
-                        <small>분석 신뢰도</small>
+                        <small>데이터 축적도</small>
                         <strong>{formatPercent(confidence)}</strong>
                       </span>
                     </div>

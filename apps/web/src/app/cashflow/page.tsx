@@ -297,7 +297,7 @@ export default function CashflowPage() {
           aside={
             <div className="chart-legend">
               <span><i className="legend-safe" /> 가용자금</span>
-              <span><i className="legend-risk" /> 0원 미만</span>
+              <span><i className="legend-risk" /> 결제 안전기준 미달</span>
               {riskDate && <span><i className="legend-marker" /> 위험 시점</span>}
             </div>
           }
@@ -314,7 +314,11 @@ export default function CashflowPage() {
                 typeof balance === "number"
                   ? Math.max(5, (Math.abs(balance) / maxAbsoluteBalance) * 76)
                   : 5;
-              const negative = typeof balance === "number" && balance < 0;
+              const positionStatus = normalizeStatus(position.status);
+              const belowSafety =
+                (typeof balance === "number" && balance < 0) ||
+                positionStatus === "PREPARE" ||
+                positionStatus === "ACT_NOW";
               const isRiskDay = Boolean(riskDate) && position.date === riskDate;
               return (
                 <div
@@ -328,7 +332,7 @@ export default function CashflowPage() {
                     </span>
                   )}
                   <span
-                    className={`cashflow-bar ${negative ? "negative" : ""} ${
+                    className={`cashflow-bar ${belowSafety ? "negative" : ""} ${
                       typeof balance !== "number" ? "unknown" : ""
                     }`}
                     style={{ height: `${height}%` }}

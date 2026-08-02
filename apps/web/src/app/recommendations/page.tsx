@@ -292,7 +292,7 @@ export default function RecommendationsPage() {
     : selected.rationale ||
       selected.summary ||
       selected.reason ||
-      "API 응답에 추천 근거가 포함되지 않았습니다.";
+      "현재 금융정보와 안전정책을 바탕으로 선택한 대응안입니다.";
 
   return (
     <>

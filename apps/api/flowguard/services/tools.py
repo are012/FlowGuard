@@ -158,7 +158,58 @@ class CoreToolService:
 
     @staticmethod
     def _normalized_events(snapshot: FinancialSnapshot) -> list[dict[str, Any]]:
-        events = [event.model_dump(mode="json") for event in snapshot.scheduled_events]
+        accounts = {account.account_id: account for account in snapshot.accounts}
+        cards = {card.card_id: card for card in snapshot.cards}
+        counterparties = {
+            counterparty.counterparty_id: counterparty for counterparty in snapshot.counterparties
+        }
+        installment_plans = {plan.installment_plan_id: plan for plan in snapshot.installment_plans}
+
+        def description_for(
+            *,
+            event_type: str,
+            amount: int,
+            account_id: str,
+            counterparty_id: str | None = None,
+            source_reference_id: str | None = None,
+        ) -> str:
+            account_name = accounts[account_id].name
+            counterparty = counterparties.get(counterparty_id or "")
+            if event_type == "RECEIVABLE":
+                sender = counterparty.name if counterparty is not None else "거래처"
+                return f"{sender}에서 {amount:,}원이 {account_name}로 입금될 예정입니다."
+            if event_type == "CARD_BILL":
+                card = cards.get(source_reference_id or "")
+                card_name = card.name if card is not None else "카드"
+                return f"{card_name} 결제대금 {amount:,}원이 {account_name}에서 출금될 예정입니다."
+            if event_type == "INSTALLMENT_PAYMENT":
+                plan = installment_plans.get(source_reference_id or "")
+                card = cards.get(plan.card_id) if plan is not None else None
+                card_name = card.name if card is not None else "카드"
+                return f"{card_name} 할부금 {amount:,}원이 {account_name}에서 출금될 예정입니다."
+            event_labels = {
+                "RENT": "월세",
+                "INSURANCE": "보험료",
+                "SAVINGS": "저축",
+                "DISCRETIONARY_EXPENSE": "선택지출",
+                "OTHER": "예정 거래",
+            }
+            label = event_labels.get(event_type, "예정 거래")
+            return f"{label} {amount:,}원이 {account_name}에서 처리될 예정입니다."
+
+        events: list[dict[str, Any]] = []
+        for scheduled_event in snapshot.scheduled_events:
+            event = scheduled_event.model_dump(mode="json")
+            counterparty = counterparties.get(scheduled_event.counterparty_id or "")
+            event["description"] = description_for(
+                event_type=scheduled_event.event_type.value,
+                amount=scheduled_event.amount,
+                account_id=scheduled_event.account_id,
+                counterparty_id=scheduled_event.counterparty_id,
+                source_reference_id=scheduled_event.source_reference_id,
+            )
+            event["counterparty_name"] = counterparty.name if counterparty is not None else None
+            events.append(event)
 
         def already_present(
             *,
@@ -205,6 +256,18 @@ class CoreToolService:
                     "expected_date": expected_date.isoformat(),
                     "account_id": receivable.destination_account_id,
                     "counterparty_id": receivable.counterparty_id,
+                    "counterparty_name": (
+                        counterparties[receivable.counterparty_id].name
+                        if receivable.counterparty_id in counterparties
+                        else None
+                    ),
+                    "description": description_for(
+                        event_type="RECEIVABLE",
+                        amount=receivable.amount,
+                        account_id=receivable.destination_account_id,
+                        counterparty_id=receivable.counterparty_id,
+                        source_reference_id=receivable.receivable_id,
+                    ),
                     "certainty": "CONFIRMED" if confirmed else "ESTIMATED",
                     "is_essential": False,
                     "is_adjustable": False,
@@ -213,7 +276,6 @@ class CoreToolService:
                 }
             )
 
-        cards = {card.card_id: card for card in snapshot.cards}
         for card in snapshot.cards:
             if card.current_billing_amount <= 0 or already_present(
                 source_reference_id=card.card_id,
@@ -232,6 +294,13 @@ class CoreToolService:
                     "expected_date": card.billing_date.isoformat(),
                     "account_id": card.payment_account_id,
                     "counterparty_id": None,
+                    "counterparty_name": None,
+                    "description": description_for(
+                        event_type="CARD_BILL",
+                        amount=card.current_billing_amount,
+                        account_id=card.payment_account_id,
+                        source_reference_id=card.card_id,
+                    ),
                     "certainty": "CONFIRMED",
                     "is_essential": True,
                     "is_adjustable": False,
@@ -273,6 +342,13 @@ class CoreToolService:
                         "expected_date": payment_date.isoformat(),
                         "account_id": card.payment_account_id,
                         "counterparty_id": None,
+                        "counterparty_name": None,
+                        "description": description_for(
+                            event_type="INSTALLMENT_PAYMENT",
+                            amount=plan.monthly_payment,
+                            account_id=card.payment_account_id,
+                            source_reference_id=plan.installment_plan_id,
+                        ),
                         "certainty": "CONFIRMED",
                         "is_essential": True,
                         "is_adjustable": False,

@@ -1,0 +1,502 @@
+/* Recommendations */
+.recommendation-count {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: flex;
+  gap: 9px;
+  padding: 9px 13px;
+}
+
+.recommendation-count strong {
+  color: var(--green);
+  font-size: 20px;
+}
+
+.recommendation-count span {
+  color: var(--ink-soft);
+  font-size: 9px;
+  line-height: 1.3;
+  max-width: 45px;
+}
+
+.recommendations-layout {
+  align-items: start;
+  display: grid;
+  gap: 18px;
+  grid-template-columns: 280px minmax(0, 1fr);
+}
+
+.recommendation-selector {
+  padding: 20px;
+  position: sticky;
+  top: 96px;
+}
+
+.recommendation-selector > div {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.recommendation-selector button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: 23px 1fr auto;
+  padding: 11px;
+  text-align: left;
+  width: 100%;
+}
+
+.recommendation-selector button:hover {
+  background: var(--surface-soft);
+}
+
+.recommendation-selector button.active {
+  background: var(--green-soft);
+  border-color: #cae0d4;
+}
+
+.recommendation-selector button > span {
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-weight: 850;
+}
+
+.recommendation-selector button.active > span,
+.recommendation-selector button.active > svg {
+  color: var(--green);
+}
+
+.recommendation-selector strong,
+.recommendation-selector small {
+  display: block;
+}
+
+.recommendation-selector strong {
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.recommendation-selector small {
+  color: var(--ink-muted);
+  font-size: 8px;
+  margin-top: 2px;
+}
+
+.candidate-comparison-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.candidate-comparison-meta > span {
+  background: var(--surface-soft);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 7px;
+  font-weight: 750;
+  padding: 3px 6px;
+}
+
+.candidate-comparison-meta > span.valid {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.candidate-comparison-meta > span.invalid {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.recommendation-selector .candidate-rejection-reason {
+  color: var(--red);
+  line-height: 1.45;
+  margin-top: 6px;
+}
+
+.recommendation-detail {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.primary-plan {
+  background:
+    radial-gradient(circle at 95% 0, rgba(211, 235, 221, 0.8), transparent 20rem),
+    var(--surface);
+  padding: 29px;
+}
+
+.primary-plan-top {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 25px;
+}
+
+.plan-icon {
+  align-items: center;
+  background: var(--green-dark);
+  border-radius: 16px;
+  color: white;
+  display: flex;
+  height: 54px;
+  justify-content: center;
+  width: 54px;
+}
+
+.policy-chip {
+  align-items: center;
+  border-radius: 999px;
+  display: flex;
+  font-size: 9px;
+  font-weight: 800;
+  gap: 6px;
+  padding: 6px 9px;
+}
+
+.policy-chip.valid {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.policy-chip.invalid {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.primary-plan h2 {
+  font-size: clamp(26px, 3vw, 38px);
+  letter-spacing: -0.055em;
+  line-height: 1.25;
+  margin: 6px 0 8px;
+  max-width: 680px;
+}
+
+.plan-rationale {
+  color: var(--ink-soft);
+  margin: 0;
+  max-width: 680px;
+}
+
+.plan-actions {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 14px;
+  margin-top: 27px;
+  padding-top: 23px;
+}
+
+.plan-actions article {
+  align-items: flex-start;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 27px 1fr;
+}
+
+.action-order {
+  align-items: center;
+  background: var(--green-soft);
+  border-radius: 50%;
+  color: var(--green);
+  display: flex;
+  font-size: 9px;
+  font-weight: 850;
+  height: 27px;
+  justify-content: center;
+  width: 27px;
+}
+
+.plan-actions article > div > strong {
+  font-size: 13px;
+}
+
+.plan-actions article p {
+  color: var(--ink-muted);
+  font-size: 9px;
+  margin: 3px 0 0;
+}
+
+.plan-actions dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 9px 0 0;
+}
+
+.plan-actions dl > div {
+  display: flex;
+  gap: 5px;
+}
+
+.plan-actions dt {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.plan-actions dd {
+  font-size: 8px;
+  font-weight: 800;
+  margin: 0;
+}
+
+.recommendation-evidence {
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  margin-top: 24px;
+  padding: 14px 16px;
+}
+
+.recommendation-evidence summary {
+  color: var(--green-dark);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.recommendation-evidence > p {
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.65;
+  margin: 13px 0;
+}
+
+.recommendation-evidence dl {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 13px;
+}
+
+.recommendation-evidence dl > div {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 86px minmax(0, 1fr);
+}
+
+.recommendation-evidence dt,
+.recommendation-evidence dd {
+  font-size: 8px;
+  line-height: 1.5;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.recommendation-evidence dt {
+  color: var(--ink-muted);
+}
+
+.recommendation-evidence dd {
+  color: var(--ink-soft);
+  font-weight: 750;
+}
+
+.evaluation-card {
+  padding: 25px;
+}
+
+.evaluation-heading {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.evaluation-heading h3 {
+  font-size: 19px;
+  letter-spacing: -0.04em;
+  margin: 3px 0 0;
+}
+
+.virtual-label {
+  background: var(--blue-soft);
+  border-radius: 999px;
+  color: var(--blue);
+  font-size: 8px;
+  font-weight: 800;
+  padding: 5px 8px;
+}
+
+.safe-change {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr auto 1fr;
+  margin-top: 12px;
+}
+
+.safe-change > div {
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 12px 14px;
+}
+
+.safe-change span,
+.safe-change strong {
+  display: block;
+}
+
+.safe-change span {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.safe-change strong {
+  font-size: 14px;
+  margin-top: 2px;
+}
+
+.safe-change > svg {
+  color: var(--ink-muted);
+}
+
+.rebound-warning,
+.rebound-clear {
+  align-items: flex-start;
+  border-radius: 15px;
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 13px;
+}
+
+.rebound-warning {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.rebound-clear {
+  background: var(--green-soft);
+  color: var(--green-dark);
+}
+
+.rebound-warning strong,
+.rebound-clear strong {
+  font-size: 11px;
+}
+
+.rebound-warning p,
+.rebound-clear p {
+  font-size: 9px;
+  margin: 2px 0 0;
+}
+
+.policy-violations {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.policy-violations p {
+  align-items: center;
+  background: var(--red-soft);
+  border-radius: 9px;
+  color: var(--red);
+  display: flex;
+  font-size: 9px;
+  gap: 7px;
+  margin: 0;
+  padding: 8px 10px;
+}
+
+.approval-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 20px;
+}
+
+.approval-card > div:first-child {
+  align-items: flex-start;
+  color: var(--ink-soft);
+  display: flex;
+  font-size: 10px;
+  gap: 9px;
+}
+
+.approval-card > div:first-child p {
+  margin: 0;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 17px;
+}
+
+.comparison-readonly {
+  align-items: flex-end;
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+  margin-top: 17px;
+}
+
+@media (max-width: 1080px) {
+  .recommendations-layout {
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 860px) {
+  .recommendations-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .recommendation-selector {
+    position: static;
+  }
+
+  .recommendation-selector > div {
+    display: flex;
+    overflow-x: auto;
+  }
+
+  .recommendation-selector button {
+    flex: 0 0 210px;
+  }
+}
+
+@media (max-width: 620px) {
+  .recommendation-selector {
+    padding: 14px;
+  }
+
+  .primary-plan {
+    padding: 22px 19px;
+  }
+
+  .primary-plan h2 {
+    font-size: 28px;
+  }
+
+  .evaluation-card {
+    padding: 19px 16px;
+  }
+
+  .safe-change {
+    gap: 6px;
+  }
+
+  .safe-change > div {
+    padding: 10px;
+  }
+
+  .safe-change strong {
+    font-size: 11px;
+  }
+
+  .approval-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}

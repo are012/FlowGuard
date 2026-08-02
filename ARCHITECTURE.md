@@ -22,11 +22,11 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 | API/분석 | FastAPI 요청 안에서 동기 분석 | API와 durable worker 분리 |
 | AI 해석 | 같은 Python distribution의 별도 FastAPI 진입점, 단일 worker | 공유 멱등 저장소 기반 다중 worker 서비스 |
 | 코어/MCP 도구 | 일곱 도구와 FastMCP 진입점 구현; 분석 경로는 동일 구현을 in-process 호출 | 별도 MCP 프로세스와 transport |
-| 저장소 | SQLite 기본·테스트 완료; PostgreSQL 설정 경로 제공 | 검증된 PostgreSQL 배포와 마이그레이션 |
+| 저장소 | Alembic 버전 관리 SQLite·마이그레이션 테스트 완료; PostgreSQL 설정 경로 제공 | 검증된 PostgreSQL 배포·통합 테스트 |
 | 큐/스케줄러 | 없음 | Redis queue, lease, 정기 실행 |
 | Docker | Dockerfile·Compose 없음 | 11절의 목표 토폴로지 |
 
-자동 검증은 SQLite, Fake OpenAI client와 MockTransport를 사용하며 E2E에서는 AI
+자동 검증은 Alembic으로 구성한 SQLite, Fake OpenAI client와 MockTransport를 사용하며 E2E에서는 AI
 연결 실패 시 결정론적 폴백을 확인합니다. 실제 OpenAI 호출, API와 AI 프로세스 사이의
 성공 경로, PostgreSQL, Redis, Docker 토폴로지와 프로세스 간 MCP transport는 아직
 통합 검증하지 않았습니다.

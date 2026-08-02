@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from flowguard.main import create_app
+from flowguard.services.tools import CoreToolService
 from flowguard.storage import FlowGuardRepository
 
 SAMPLE_CSV = (
@@ -38,10 +39,10 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
             "accounts": 3,
             "cards": 2,
             "transactions": 23,
-            "counterparties": 2,
-            "payment_histories": 4,
+            "counterparties": 3,
+            "payment_histories": 14,
             "scheduled_events": 2,
-            "receivables": 1,
+            "receivables": 2,
             "installment_plans": 1,
             "protected_funds": 1,
             "candidates": 5,
@@ -63,7 +64,20 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         dashboard_payload = dashboard.json()
         assert dashboard_payload["safe_to_spend"]["safe_to_spend"] == 100_000
         assert dashboard_payload["risk_metrics"]["shortfall_type"] == "PAYMENT_ACCOUNT"
+        assert dashboard_payload["risk_metrics"]["expected_gap_min"] == 50_000
         assert dashboard_payload["risk_metrics"]["expected_gap_max"] == 250_000
+        assert dashboard_payload["presentation"]["impact"] == (
+            "약 50,000~250,000원이 부족할 수 있습니다"
+        )
+        assert dashboard_payload["risk_metrics"]["data_confidence"] == 0.5
+        assert dashboard_payload["presentation"]["confidence_label"] == (
+            "예정 수입을 확인할수록 분석이 정밀해져요"
+        )
+        primary_evidence = CoreToolService(repository).get_counterparty_evidence(
+            dashboard_payload["snapshot_id"], "client-a"
+        )
+        assert primary_evidence["payment_history_count"] == 6
+        assert primary_evidence["data_confidence"] == 1.0
         assert dashboard_payload["recommendation"]["actions"][0]["type"] == "transfer"
         comparison = dashboard_payload["recommendation"]["comparison_candidates"]
         assert len(comparison) >= 2
@@ -75,23 +89,52 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         assert len(tool_calls) <= 10
         assert [item["sequence"] for item in tool_calls] == list(range(1, len(tool_calls) + 1))
 
-        receivables = client.get("/api/v1/receivables", headers=headers).json()
-        assert receivables[0]["counterparty_name"] == "콘텐츠랩B"
-        evidence = receivables[0]["counterparty_evidence"]
-        assert evidence["payment_history_count"] == 4
-        assert evidence["average_delay_days"] == 5.75
-        assert evidence["recent_trend"] == "WORSENING"
+        timeline = client.get("/api/v1/cashflow/timeline", headers=headers).json()
+        valid_statuses = {"STABLE", "VERIFY", "PREPARE", "ACT_NOW"}
+        assert {position["status"] for position in timeline["daily_positions"]} <= valid_statuses
+        risk_position = next(
+            position
+            for position in timeline["daily_positions"]
+            if position["date"] == dashboard_payload["risk_metrics"]["first_risk_date"]
+        )
+        assert risk_position["status"] == "ACT_NOW"
+
+        receivables = {
+            item["receivable_id"]: item
+            for item in client.get("/api/v1/receivables", headers=headers).json()
+        }
+        assert receivables["receivable-b-next"]["counterparty_name"] == "콘텐츠랩B"
+        delayed_evidence = receivables["receivable-b-next"]["counterparty_evidence"]
+        assert delayed_evidence["payment_history_count"] == 4
+        assert delayed_evidence["average_delay_days"] == 5.75
+        assert delayed_evidence["recent_trend"] == "WORSENING"
+        assert receivables["receivable-c-next"]["counterparty_name"] == "교육스튜디오C"
+        steady_evidence = receivables["receivable-c-next"]["counterparty_evidence"]
+        assert steady_evidence["payment_history_count"] == 4
+        assert steady_evidence["average_delay_days"] == 1.5
+        assert steady_evidence["maximum_delay_days"] == 3
 
         risk = client.get("/api/v1/risks/next", headers=headers).json()
         assert {event["event_type"] for event in risk["triggering_events"]} == {
             "CARD_BILL",
             "INSTALLMENT_PAYMENT",
         }
+        assert all(event["description"] for event in risk["triggering_events"])
+        assert any(
+            "생활비 카드 결제대금" in event["description"] for event in risk["triggering_events"]
+        )
+        assert any(
+            "사업용 카드 할부금" in event["description"] for event in risk["triggering_events"]
+        )
         assert risk["causes"] == [risk["presentation"]["cause"]]
 
         recommendations = client.get("/api/v1/recommendations", headers=headers).json()
         assert len(recommendations) == 1
         recommendation = recommendations[0]
+        assert recommendation["title"] == "결제계좌에 250,000원을 미리 옮기세요"
+        assert recommendation["summary"]
+        assert recommendation["rationale"]
+        assert "baseline_result" not in recommendation["rationale"]
         approved = client.post(
             (f"/api/v1/recommendations/{recommendation['recommendation_id']}/approve"),
             headers=headers,

@@ -64,7 +64,7 @@
 | API와 분석 | FastAPI 요청 안에서 `AnalysisOrchestrator` 동기 실행 | API와 durable worker 분리 |
 | 코어/MCP 도구 | MCP 계약과 같은 도구 구현을 API 프로세스에서 직접 호출; FastMCP 진입점 제공 | 별도 MCP 프로세스와 transport 연결 |
 | AI 해석 | 같은 Python distribution의 별도 FastAPI 프로세스, 단일 worker | 공유 멱등 저장소를 사용하는 독립 서비스 |
-| 저장소 | SQLite 기본·자동 테스트 대상; PostgreSQL URL과 driver 경로 제공 | 마이그레이션을 포함해 검증된 PostgreSQL 배포 |
+| 저장소 | Alembic 버전 관리 SQLite·자동 마이그레이션 테스트; PostgreSQL URL과 driver 경로 제공 | 검증된 PostgreSQL 배포·통합 테스트 |
 | 큐와 스케줄러 | 사용하지 않음 | Redis queue, lease, 정기 실행 |
 | 컨테이너 | Dockerfile과 Compose를 MVP 완료 조건에 포함하지 않음 | 운영 배포 방식 확정 후 구성 |
 
@@ -636,11 +636,17 @@ Deterministic Financial Core는 다음 값을 계산한다.
       "total_balance": 1000000,
       "available_balance": 0,
       "protected_balance": 1000000,
+      "status": "ACT_NOW",
       "triggering_event_ids": ["event-card-bill-001"]
     }
   ]
 }
 ```
+
+`daily_positions[].status`는 네 가지 지연 시나리오의 해당 날짜 부족 가능성과
+이전에 발생해 일별 잔액·보호 기준상 아직 해소되지 않은 부족, 필수지출 여부,
+임박도, 데이터 확인 상태를 금융 백엔드가 13.3의 규칙으로 판정한 값이다.
+클라이언트는 잔액만 보고 별도의 위험 상태를 만들지 않는다.
 
 ---
 
@@ -1483,9 +1489,23 @@ confirm_receivable
 
 ```json
 {
-  "events": []
+  "events": [
+    {
+      "event_id": "event-card-bill-001",
+      "event_type": "CARD_BILL",
+      "direction": "OUTFLOW",
+      "amount": 950000,
+      "expected_date": "2026-08-25",
+      "account_id": "account-001",
+      "counterparty_name": null,
+      "description": "생활비 카드 결제대금 950,000원이 생활비 결제계좌에서 출금될 예정입니다."
+    }
+  ]
 }
 ```
+
+`description`은 원장 필드와 연결된 계좌·카드·거래처 이름만 사용해 백엔드가
+결정적으로 만드는 사용자용 설명이다.
 
 ---
 

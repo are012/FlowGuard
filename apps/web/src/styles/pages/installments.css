@@ -1,0 +1,363 @@
+/* Installments */
+.installment-summary {
+  display: grid;
+  gap: 13px;
+  grid-template-columns: 1.35fr 0.82fr 0.82fr;
+}
+
+.installment-total-card {
+  align-items: center;
+  background: var(--green-dark);
+  border-radius: 22px;
+  color: white;
+  display: flex;
+  justify-content: space-between;
+  min-height: 140px;
+  padding: 22px 25px;
+}
+
+.installment-total-card strong,
+.installment-total-card small {
+  display: block;
+}
+
+.installment-total-card strong {
+  font-size: 29px;
+  letter-spacing: -0.045em;
+  margin-top: 7px;
+}
+
+.installment-total-card small {
+  color: #9ebbb0;
+  font-size: 9px;
+}
+
+.installment-total-card > span {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  color: #d8eee2;
+  display: flex;
+  height: 57px;
+  justify-content: center;
+  width: 57px;
+}
+
+.summary-mini {
+  align-items: center;
+  display: flex;
+  gap: 13px;
+  min-height: 140px;
+  padding: 20px;
+}
+
+.mini-icon {
+  align-items: center;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  color: var(--green);
+  display: flex;
+  height: 42px;
+  justify-content: center;
+  width: 42px;
+}
+
+.summary-mini small,
+.summary-mini strong {
+  display: block;
+}
+
+.summary-mini small {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.summary-mini strong {
+  font-size: 16px;
+  margin-top: 2px;
+}
+
+.installment-list {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.installment-card {
+  padding: 19px;
+}
+
+.installment-card-top {
+  align-items: center;
+  display: grid;
+  gap: 11px;
+  grid-template-columns: 39px 1fr auto;
+}
+
+.merchant-icon {
+  align-items: center;
+  background: var(--blue-soft);
+  border-radius: 12px;
+  color: var(--blue);
+  display: flex;
+  height: 39px;
+  justify-content: center;
+  width: 39px;
+}
+
+.installment-card-top h3 {
+  font-size: 13px;
+  margin: 0;
+}
+
+.installment-card-top p {
+  color: var(--ink-muted);
+  font-size: 8px;
+  margin: 2px 0 0;
+}
+
+.plan-status {
+  background: var(--green-soft);
+  border-radius: 999px;
+  color: var(--green);
+  font-size: 8px;
+  font-weight: 800;
+  padding: 4px 7px;
+}
+
+.ps-completed,
+.ps-cancelled,
+.ps-unknown {
+  background: #efefec;
+  color: var(--ink-muted);
+}
+
+.installment-money {
+  background: var(--surface-soft);
+  border-radius: 14px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 17px;
+  padding: 12px;
+}
+
+.installment-money > div {
+  border-right: 1px solid var(--line);
+  padding: 0 9px;
+}
+
+.installment-money > div:last-child {
+  border-right: 0;
+}
+
+.installment-money small,
+.installment-money strong {
+  display: block;
+}
+
+.installment-money small {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.installment-money strong {
+  font-size: 10px;
+  margin-top: 2px;
+}
+
+.installment-progress {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr auto;
+  margin-top: 15px;
+}
+
+.installment-progress > div {
+  background: #e5e7e1;
+  border-radius: 999px;
+  height: 5px;
+  overflow: hidden;
+}
+
+.installment-progress > div span {
+  background: var(--green);
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+}
+
+.installment-progress small {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.precheck-section {
+  margin-top: 12px;
+}
+
+.precheck-layout {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(310px, 0.85fr) minmax(0, 1.15fr);
+}
+
+.precheck-form {
+  padding: 23px;
+}
+
+.precheck-form-heading {
+  align-items: center;
+  display: flex;
+  gap: 11px;
+  margin-bottom: 20px;
+}
+
+.precheck-form-heading > span {
+  align-items: center;
+  background: var(--green-soft);
+  border-radius: 13px;
+  color: var(--green);
+  display: flex;
+  height: 42px;
+  justify-content: center;
+  width: 42px;
+}
+
+.precheck-form-heading h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.precheck-form-heading p {
+  color: var(--ink-muted);
+  font-size: 9px;
+  margin: 1px 0 0;
+}
+
+.precheck-form .button-wide {
+  margin-top: 18px;
+}
+
+.precheck-result {
+  min-height: 100%;
+  padding: 25px;
+}
+
+.precheck-placeholder {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  justify-content: center;
+  min-height: 335px;
+  text-align: center;
+}
+
+.precheck-placeholder > span {
+  align-items: center;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  color: var(--ink-muted);
+  display: flex;
+  height: 58px;
+  justify-content: center;
+  width: 58px;
+}
+
+.precheck-placeholder h3 {
+  font-size: 15px;
+  margin: 15px 0 5px;
+}
+
+.precheck-placeholder p {
+  color: var(--ink-muted);
+  font-size: 10px;
+  margin: 0;
+  max-width: 390px;
+}
+
+.precheck-result-heading {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 17px;
+}
+
+.precheck-result-heading h3 {
+  font-size: 18px;
+  margin: 3px 0 0;
+}
+
+.precheck-result-heading > span {
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 800;
+  padding: 5px 8px;
+}
+
+.precheck-result-heading > span.valid {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.precheck-result-heading > span.invalid {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.precheck-version {
+  color: var(--ink-muted);
+  font-size: 8px;
+  margin: 13px 0 0;
+  text-align: right;
+}
+
+@media (max-width: 1080px) {
+  .precheck-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 860px) {
+  .installment-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .installment-total-card {
+    grid-column: 1 / -1;
+  }
+
+  .installment-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .installment-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .installment-total-card {
+    grid-column: auto;
+  }
+
+  .summary-mini {
+    min-height: 100px;
+  }
+
+  .installment-card {
+    padding: 16px;
+  }
+
+  .installment-money {
+    padding: 10px 4px;
+  }
+
+  .precheck-form,
+  .precheck-result {
+    padding: 19px 16px;
+  }
+}

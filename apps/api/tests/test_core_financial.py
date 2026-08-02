@@ -128,6 +128,7 @@ def test_scenario_1_stable_and_safe_to_spend_is_positive() -> None:
     policy = validate_financial_policy(stable, [])
 
     assert len(analysis.daily_positions) == 91
+    assert {position.status for position in analysis.daily_positions} == {RiskStatus.STABLE}
     assert analysis.risk_metrics.shortfall_probability == 0
     assert analysis.risk_metrics.shortfall_type is None
     assert safe.safe_to_spend == 700_000
@@ -169,6 +170,18 @@ def test_scenario_2_payment_account_shortfall_and_transfer_resolution() -> None:
     evaluation = evaluate_action_plan(payment_shortfall, [action])
 
     assert before.risk_metrics.shortfall_type == ShortfallType.PAYMENT_ACCOUNT
+    assert (
+        next(
+            position for position in before.daily_positions if position.date == date(2026, 8, 25)
+        ).status
+        == RiskStatus.ACT_NOW
+    )
+    assert (
+        next(
+            position for position in before.daily_positions if position.date == date(2026, 8, 26)
+        ).status
+        == RiskStatus.ACT_NOW
+    )
     assert before.risk_metrics.total_liquidity_shortfall_probability == 0
     assert safe.safe_to_spend == 300_000
     assert safe.binding_constraint is not None
@@ -236,6 +249,55 @@ def test_scenario_3_total_liquidity_shortfall_rejects_protected_fund_transfer() 
     assert any(
         violation.code == "PROTECTED_FUND_VIOLATION" for violation in evaluation.policy_violations
     )
+
+
+def test_daily_status_remains_urgent_until_a_shortfall_is_recovered() -> None:
+    shortfall_date = date(2026, 8, 18)
+    liquidity_recovery_date = date(2026, 8, 20)
+    account_recovery_date = date(2026, 8, 22)
+    persistent_shortfall = snapshot(
+        accounts=[account("payment", 100, payment=True), account("savings", 0)],
+        scheduled_events=[
+            event(
+                "essential-payment",
+                EventType.RENT,
+                Direction.OUTFLOW,
+                200,
+                shortfall_date,
+                "payment",
+                essential=True,
+            ),
+            event(
+                "liquidity-recovery",
+                EventType.OTHER_INFLOW,
+                Direction.INFLOW,
+                200,
+                liquidity_recovery_date,
+                "savings",
+            ),
+            event(
+                "account-recovery",
+                EventType.OTHER_INFLOW,
+                Direction.INFLOW,
+                200,
+                account_recovery_date,
+                "payment",
+            ),
+        ],
+    )
+
+    positions = {
+        position.date: position
+        for position in simulate_cashflow(persistent_shortfall).daily_positions
+    }
+
+    assert positions[shortfall_date].total_balance == -100
+    assert positions[shortfall_date].available_balance == 0
+    assert positions[shortfall_date].status == RiskStatus.ACT_NOW
+    assert positions[date(2026, 8, 19)].status == RiskStatus.ACT_NOW
+    assert positions[liquidity_recovery_date].total_balance == 100
+    assert positions[liquidity_recovery_date].status == RiskStatus.ACT_NOW
+    assert positions[account_recovery_date].status == RiskStatus.STABLE
 
 
 def test_scenario_4_delayed_receivable_exposes_card_risk_and_evidence() -> None:
@@ -316,6 +378,7 @@ def test_scenario_4_delayed_receivable_exposes_card_risk_and_evidence() -> None:
     assert evidence.maximum_delay_days == 14
     assert evidence.recent_trend == RecentTrend.WORSENING
     assert presentation.status in {RiskStatus.PREPARE, RiskStatus.ACT_NOW}
+    assert presentation.impact == "약 250,000원이 부족할 수 있습니다"
 
 
 def test_scenario_5_installment_concentration_has_no_double_counting() -> None:
@@ -510,6 +573,7 @@ def test_snapshot_is_immutable_unknown_actions_fail_and_data_gaps_are_not_stable
     presentation = map_risk_presentation(analysis)
 
     assert presentation.status == RiskStatus.VERIFY
+    assert {position.status for position in analysis.daily_positions} == {RiskStatus.VERIFY}
     with pytest.raises(ValidationError):
         evaluate_action_plan(uncertain, [{"type": "borrow_money", "parameters": {}}])
     with pytest.raises(ValidationError):

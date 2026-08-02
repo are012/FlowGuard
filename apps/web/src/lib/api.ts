@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const DEFAULT_API_URL = "http://localhost:8000";
 
@@ -18,6 +18,9 @@ export class ApiError extends Error {
   }
 }
 
+const remoteCache = new Map<string, unknown>();
+let remoteCacheGeneration = 0;
+
 function apiUrl(path: string) {
   return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
 }
@@ -30,9 +33,10 @@ async function readError(response: Response) {
     };
     if (typeof body.detail === "string") return body.detail;
     if (Array.isArray(body.detail)) {
-      return body.detail.map((item) => item.msg).filter(Boolean).join(", ");
+      const detail = body.detail.map((item) => item.msg).filter(Boolean).join(", ");
+      if (detail) return detail;
     }
-    if (body.message) return body.message;
+    if (typeof body.message === "string" && body.message) return body.message;
   } catch {
     // The status text below remains the only truthful error information.
   }
@@ -58,6 +62,11 @@ export async function apiRequest<T>(
     throw new ApiError(await readError(response), response.status);
   }
 
+  if ((init.method || "GET").toUpperCase() !== "GET") {
+    remoteCache.clear();
+    remoteCacheGeneration += 1;
+  }
+
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
@@ -68,17 +77,48 @@ interface RemoteState<T> {
   loading: boolean;
 }
 
+function initialRemoteState<T>(path: string): RemoteState<T> {
+  if (!remoteCache.has(path)) return { loading: true };
+  return { data: remoteCache.get(path) as T, loading: false };
+}
+
 export function useRemote<T>(path: string) {
   const [revision, setRevision] = useState(0);
-  const [state, setState] = useState<RemoteState<T>>({ loading: true });
+  const forceRefreshPath = useRef<string | null>(null);
+  const [state, setState] = useState<RemoteState<T>>(() => initialRemoteState<T>(path));
 
   useEffect(() => {
+    const forceRefresh = forceRefreshPath.current === path;
+    forceRefreshPath.current = null;
+
+    if (!forceRefresh && remoteCache.has(path)) {
+      setState({ data: remoteCache.get(path) as T, loading: false });
+      return;
+    }
+
     const controller = new AbortController();
+    const requestGeneration = remoteCacheGeneration;
+    setState((current) =>
+      forceRefresh
+        ? { ...current, error: undefined, loading: true }
+        : { loading: true },
+    );
 
     apiRequest<T>(path, { signal: controller.signal })
-      .then((data) => setState({ data, loading: false }))
+      .then((data) => {
+        if (requestGeneration !== remoteCacheGeneration) {
+          setRevision((value) => value + 1);
+          return;
+        }
+        remoteCache.set(path, data);
+        setState({ data, loading: false });
+      })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
+        if (requestGeneration !== remoteCacheGeneration) {
+          setRevision((value) => value + 1);
+          return;
+        }
         setState({
           error: error instanceof Error ? error : new Error("알 수 없는 오류가 발생했습니다."),
           loading: false,
@@ -89,9 +129,10 @@ export function useRemote<T>(path: string) {
   }, [path, revision]);
 
   const reload = useCallback(() => {
+    forceRefreshPath.current = path;
     setState((current) => ({ ...current, loading: true, error: undefined }));
     setRevision((value) => value + 1);
-  }, []);
+  }, [path]);
   return { ...state, reload };
 }
 

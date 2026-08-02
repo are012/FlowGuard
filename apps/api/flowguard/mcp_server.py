@@ -18,7 +18,7 @@ _tools: CoreToolService | None = None
 def tool_service() -> CoreToolService:
     global _repository, _tools
     if _tools is None:
-        _repository = FlowGuardRepository()
+        _repository = FlowGuardRepository(create_schema=False)
         _tools = CoreToolService(_repository)
     return _tools
 

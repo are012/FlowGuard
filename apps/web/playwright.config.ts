@@ -58,6 +58,7 @@ export default defineConfig({
       env: {
         ...applicationEnvironment,
         DATABASE_URL: databaseUrl,
+        FLOWGUARD_AUTO_CREATE_SCHEMA: "true",
         FLOWGUARD_AI_SERVER_URL: "http://127.0.0.1:1",
         FLOWGUARD_CORS_ORIGINS: WEB_URL,
         FLOWGUARD_DEMO_USER_ID: "e2e-user",

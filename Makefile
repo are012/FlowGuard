@@ -1,7 +1,7 @@
 PYTHON := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: install install-api install-ai install-web dev-api dev-ai dev-web test lint format-check typecheck build check
+.PHONY: install install-api install-ai install-web migrate migration-parity migration-check dev-api dev-ai dev-web test web-test lint format-check typecheck build check
 
 install: install-ai install-web
 
@@ -15,7 +15,16 @@ install-ai: install-api
 install-web:
 	npm --prefix apps/web install
 
-dev-api:
+migrate:
+	cd apps/api && ../../$(PYTHON) -m alembic upgrade head
+
+migration-parity:
+	cd apps/api && ../../$(PYTHON) -m flowguard.schema_parity
+
+migration-check:
+	cd apps/api && ../../$(PYTHON) -m alembic check
+
+dev-api: migrate
 	cd apps/api && ../../$(PYTHON) -m uvicorn flowguard.main:app --reload --port 8000
 
 dev-ai:
@@ -27,6 +36,9 @@ dev-web:
 
 test:
 	cd apps/api && ../../$(PYTHON) -m pytest
+
+web-test:
+	npm --prefix apps/web run test
 
 lint:
 	cd apps/api && ../../$(PYTHON) -m ruff check flowguard tests
@@ -41,4 +53,4 @@ typecheck:
 build:
 	npm --prefix apps/web run build
 
-check: test lint format-check typecheck build
+check: test web-test lint format-check typecheck build

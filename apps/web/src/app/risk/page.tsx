@@ -13,6 +13,7 @@ import {
   StatusPill,
 } from "@/components/ui";
 import { ApiError, useRemote } from "@/lib/api";
+import { confidenceProgressCopy } from "@/lib/confidence";
 import {
   formatDate,
   formatDateTime,
@@ -171,9 +172,9 @@ export default function RiskPage() {
       <section className="risk-facts card card-flat">
         <DataFact
           icon="shield"
-          label="분석 신뢰도"
+          label="데이터 확인 진행도"
           value={formatPercent(confidence)}
-          detail={presentation.confidence_label}
+          detail={confidenceProgressCopy(confidence)}
         />
         <DataFact
           icon="calendar"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime
 from typing import Any
@@ -21,8 +22,9 @@ from flowguard.config import (
     POLICY_VERSION,
     RISK_RULE_VERSION,
 )
-from flowguard.core import map_risk_presentation
+from flowguard.core import map_recommendation_presentation, map_risk_presentation
 from flowguard.domain import CashflowAnalysis, FinancialSnapshot
+from flowguard.observability import log_event
 from flowguard.storage import (
     FlowGuardRepository,
     InvalidAnalysisTransition,
@@ -48,6 +50,7 @@ STATUS_MESSAGES = {
     "COMPLETED": "분석이 완료되었습니다.",
     "FAILED": "분석에 실패했습니다.",
 }
+logger = logging.getLogger("flowguard.analysis")
 
 
 class AnalysisOrchestrator:
@@ -95,6 +98,14 @@ class AnalysisOrchestrator:
             metadata=self._metadata(is_virtual=False),
         )
         analysis_id = run["analysis_id"]
+        log_event(
+            logger,
+            logging.INFO,
+            "analysis_started",
+            analysis_id=analysis_id,
+            trigger_type=trigger_type,
+            is_virtual=False,
+        )
         try:
             self._transition(analysis_id, "SNAPSHOT_BUILDING")
             snapshot, current_state_revision = self.snapshot_builder.build_with_revision(
@@ -113,11 +124,22 @@ class AnalysisOrchestrator:
             result = self._fail(analysis_id, exc)
         except Exception as exc:
             result = self._fail_unexpected(analysis_id, exc)
-        return self._with_revision_contract(
+        response = self._with_revision_contract(
             user_id,
             result,
             analysis_revision=analysis_revision,
         )
+        log_event(
+            logger,
+            logging.INFO,
+            "analysis_finished",
+            analysis_id=analysis_id,
+            analysis_status=str(response.get("analysis_status", response.get("status"))),
+            interpretation_status=str(response.get("interpretation_status", "NOT_REQUESTED")),
+            snapshot_revision=analysis_revision,
+            is_virtual=False,
+        )
+        return response
 
     def run_virtual(
         self,
@@ -138,6 +160,14 @@ class AnalysisOrchestrator:
             metadata=self._metadata(is_virtual=True, base_snapshot_id=base_snapshot_id),
         )
         analysis_id = run["analysis_id"]
+        log_event(
+            logger,
+            logging.INFO,
+            "analysis_started",
+            analysis_id=analysis_id,
+            trigger_type="RECOMMENDATION_APPROVAL",
+            is_virtual=True,
+        )
         try:
             live_revision = self.repository.current_state_revision(user_id)
             if live_revision != expected_current_state_revision:
@@ -174,7 +204,7 @@ class AnalysisOrchestrator:
                 snapshot_id=virtual_snapshot_id,
                 payload=snapshot.model_dump(mode="json"),
             )
-            return self._analyze_snapshot(
+            result = self._analyze_snapshot(
                 analysis_id=analysis_id,
                 user_id=user_id,
                 snapshot=snapshot,
@@ -183,9 +213,20 @@ class AnalysisOrchestrator:
                 current_state_revision=live_revision,
             )
         except ServiceError as exc:
-            return self._fail(analysis_id, exc)
+            result = self._fail(analysis_id, exc)
         except Exception as exc:
-            return self._fail_unexpected(analysis_id, exc)
+            result = self._fail_unexpected(analysis_id, exc)
+        log_event(
+            logger,
+            logging.INFO,
+            "analysis_finished",
+            analysis_id=analysis_id,
+            analysis_status=str(result.get("analysis_status", result.get("status"))),
+            interpretation_status=str(result.get("interpretation_status", "NOT_REQUESTED")),
+            snapshot_revision=result.get("snapshot_revision"),
+            is_virtual=True,
+        )
+        return result
 
     def _analyze_snapshot(
         self,
@@ -241,6 +282,10 @@ class AnalysisOrchestrator:
         presentation = jsonable(map_risk_presentation(analysis_model))
         recommendations: list[dict[str, Any]] = []
         if agent_state["recommended_plan"] is not None:
+            recommendation_presentation = map_recommendation_presentation(
+                agent_state["recommended_plan"],
+                analysis_model.risk_metrics,
+            )
             derivation, comparison_candidates = self._recommendation_explanation(
                 agent_state=agent_state,
                 baseline=baseline,
@@ -253,6 +298,7 @@ class AnalysisOrchestrator:
                     user_id=user_id,
                     payload={
                         **agent_state["recommended_plan"],
+                        **recommendation_presentation,
                         "snapshot_id": snapshot.snapshot_id,
                         "current_state_revision": current_state_revision,
                         "virtual_only": True,
@@ -486,6 +532,14 @@ class AnalysisOrchestrator:
                 model_name=os.getenv("FLOWGUARD_AI_MODEL_NAME", "gpt-5.6-luna"),
             )
             if not created:
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "ai_interpretation_reused",
+                    analysis_id=payload["analysisId"],
+                    ai_request_id=payload["requestId"],
+                    interpretation_status=str(run["status"]),
+                )
                 return {
                     **run,
                     "_pending": run["status"] in {"QUEUED", "RUNNING"},
@@ -497,7 +551,7 @@ class AnalysisOrchestrator:
             )
             outcome = self.ai_client.interpret(payload)
             self._transition(payload["analysisId"], "INTERPRETATION_VALIDATING")
-            return self.repository.update_interpretation_run(
+            updated = self.repository.update_interpretation_run(
                 run["interpretation_id"],
                 status=outcome.status,
                 attempt_count=outcome.attempt_count,
@@ -506,11 +560,32 @@ class AnalysisOrchestrator:
                 response_payload=outcome.response_payload,
                 error_code=outcome.error_code,
             )
-        except Exception:
+            log_event(
+                logger,
+                logging.INFO if outcome.status == "SUCCEEDED" else logging.WARNING,
+                "ai_interpretation_finished",
+                analysis_id=payload["analysisId"],
+                ai_request_id=payload["requestId"],
+                interpretation_status=outcome.status,
+                attempt_count=outcome.attempt_count,
+                latency_ms=outcome.latency_ms,
+                error_code=outcome.error_code,
+            )
+            return updated
+        except Exception as exc:
             error_code = (
                 "interpretation_internal_error"
                 if run is not None
                 else "interpretation_persistence_error"
+            )
+            log_event(
+                logger,
+                logging.ERROR,
+                "ai_interpretation_failed",
+                analysis_id=payload["analysisId"],
+                ai_request_id=payload["requestId"],
+                error_code=error_code,
+                exception_type=type(exc).__name__,
             )
             failed = {
                 "status": "FAILED",
@@ -701,6 +776,15 @@ class AnalysisOrchestrator:
         )
 
     def _fail(self, analysis_id: str, error: ServiceError) -> dict[str, Any]:
+        log_event(
+            logger,
+            logging.ERROR,
+            "analysis_failed",
+            analysis_id=analysis_id,
+            error_code=error.code,
+            status_code=error.http_status,
+            retryable=error.retryable,
+        )
         try:
             return self.repository.transition_analysis(
                 analysis_id,

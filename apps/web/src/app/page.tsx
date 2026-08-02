@@ -14,6 +14,7 @@ import {
   SubmitNotice,
 } from "@/components/ui";
 import { ApiError, useRemote } from "@/lib/api";
+import { confidenceProgressCopy } from "@/lib/confidence";
 import {
   actionLabel,
   formatDate,
@@ -390,9 +391,9 @@ export default function DashboardPage() {
       <section className="analysis-strip" aria-label="분석 정보">
         <DataFact
           icon="shield"
-          label="데이터 신뢰도"
+          label="데이터 확인 진행도"
           value={formatPercent(confidence)}
-          detail={presentation.confidence_label}
+          detail={confidenceProgressCopy(confidence)}
         />
         <DataFact
           icon="refresh"

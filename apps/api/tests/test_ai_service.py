@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -65,8 +66,11 @@ class FakeOpenAI:
         self.responses = FakeResponses(action_id)
 
 
-def test_ai_service_echoes_contract_and_uses_no_tools() -> None:
+def test_ai_service_echoes_contract_and_uses_no_tools(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     fake = FakeOpenAI()
+    caplog.set_level(logging.INFO, logger="flowguard")
     with TestClient(create_app(openai_client=fake, model="test-model")) as client:
         response = client.post("/interpret", json=request_payload())
 
@@ -81,6 +85,13 @@ def test_ai_service_echoes_contract_and_uses_no_tools() -> None:
     assert "tools" not in call
     sent_candidates = json.loads(call["input"])["actionCandidates"]
     assert [item["actionId"] for item in sent_candidates] == ["transfer-1"]
+    events = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "flowguard.ai_service"
+    ]
+    assert events[-1]["event"] == "ai_service_interpretation_finished"
+    assert events[-1]["ai_request_id"] == "ai-request-001"
 
 
 def test_ai_service_reuses_success_for_same_idempotency_key() -> None:

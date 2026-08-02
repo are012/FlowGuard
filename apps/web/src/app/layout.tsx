@@ -5,6 +5,14 @@ import type { ReactNode } from "react";
 import { AppShell } from "@/components/shell";
 
 import "./globals.css";
+import "../styles/pages/dashboard.css";
+import "../styles/pages/setup.css";
+import "../styles/pages/cashflow.css";
+import "../styles/pages/risk.css";
+import "../styles/pages/receivables.css";
+import "../styles/pages/recommendations.css";
+import "../styles/pages/installments.css";
+import "../styles/responsive.css";
 
 const notoSansKr = Noto_Sans_KR({
   display: "swap",

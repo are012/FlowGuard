@@ -34,12 +34,15 @@ from flowguard.domain import (
     InstallmentStatus,
     ReceivableStatus,
     RiskMetrics,
+    RiskStatus,
     SafeToSpendResult,
     ScenarioCashflow,
     ScheduledCashEvent,
     ShortfallIncident,
     ShortfallType,
 )
+
+from .presentation import select_risk_status
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +391,7 @@ def _simulate_scenario(
                     protected,
                 ),
                 protected_balance=protected_balance,
+                status=RiskStatus.STABLE,
                 triggering_event_ids=tuple(triggering_event_ids),
             )
         )
@@ -515,6 +519,165 @@ def _risk_metrics(
     )
 
 
+def _daily_statuses(
+    snapshot: FinancialSnapshot,
+    scenarios: tuple[ScenarioCashflow, ...],
+    metrics: RiskMetrics,
+) -> dict[date, RiskStatus]:
+    """Derive an aggregate user state for each day across all delay scenarios."""
+
+    statuses: dict[date, RiskStatus] = {}
+    start_date = snapshot.as_of.date()
+    accounts = {account.account_id: account for account in snapshot.accounts}
+    protected = _protected_by_account(snapshot)
+    unresolved_by_scenario: dict[DelayScenario, tuple[ShortfallIncident, ...]] = {
+        scenario.scenario: () for scenario in scenarios
+    }
+
+    def remaining_incident(
+        incident: ShortfallIncident,
+        position: DailyPosition,
+    ) -> ShortfallIncident | None:
+        net_after_floors = sum(
+            position.account_balances[account_id] - protected[account_id] - account.minimum_balance
+            for account_id, account in accounts.items()
+        )
+        total_gap = max(0, snapshot.preferences.minimum_total_reserve - net_after_floors)
+        if total_gap > 0:
+            return incident.model_copy(
+                update={
+                    "date": position.date,
+                    "shortfall_type": ShortfallType.TOTAL_LIQUIDITY,
+                    "gap": total_gap,
+                }
+            )
+        account = accounts[incident.account_id]
+        account_gap = max(
+            0,
+            protected[incident.account_id]
+            + account.minimum_balance
+            - position.account_balances[incident.account_id],
+        )
+        if account_gap > 0:
+            return incident.model_copy(
+                update={
+                    "date": position.date,
+                    "shortfall_type": ShortfallType.PAYMENT_ACCOUNT,
+                    "gap": account_gap,
+                }
+            )
+        return None
+
+    for offset in range(ANALYSIS_HORIZON_DAYS):
+        current_date = start_date + timedelta(days=offset)
+        dated_scenarios: list[tuple[ScenarioCashflow, tuple[ShortfallIncident, ...]]] = []
+        has_carried_shortfall = False
+        for scenario in scenarios:
+            position = scenario.daily_positions[offset]
+            carried = tuple(
+                remaining
+                for incident in unresolved_by_scenario[scenario.scenario]
+                if (remaining := remaining_incident(incident, position)) is not None
+            )
+            current = tuple(
+                incident for incident in scenario.shortfalls if incident.date == current_date
+            )
+            has_carried_shortfall = has_carried_shortfall or bool(carried)
+            effective = (*carried, *current)
+            dated_scenarios.append((scenario, effective))
+            unresolved_by_scenario[scenario.scenario] = tuple(
+                remaining
+                for incident in effective
+                if (remaining := remaining_incident(incident, position)) is not None
+            )
+        risky_scenarios = [item for item in dated_scenarios if item[1]]
+        if not risky_scenarios:
+            daily_metrics = RiskMetrics(
+                shortfall_probability=0,
+                payment_account_shortfall_probability=0,
+                total_liquidity_shortfall_probability=0,
+                first_risk_date=None,
+                shortfall_type=None,
+                expected_gap_min=0,
+                expected_gap_max=0,
+                days_until_risk=None,
+                data_confidence=metrics.data_confidence,
+                requires_verification=metrics.requires_verification,
+            )
+        else:
+            incidents = [
+                incident
+                for _, scenario_incidents in risky_scenarios
+                for incident in scenario_incidents
+            ]
+            has_total_liquidity_risk = any(
+                incident.shortfall_type == ShortfallType.TOTAL_LIQUIDITY for incident in incidents
+            )
+            daily_metrics = RiskMetrics(
+                shortfall_probability=min(
+                    1.0, sum(scenario.weight for scenario, _ in risky_scenarios)
+                ),
+                payment_account_shortfall_probability=sum(
+                    scenario.weight
+                    for scenario, scenario_incidents in risky_scenarios
+                    if any(
+                        incident.shortfall_type == ShortfallType.PAYMENT_ACCOUNT
+                        for incident in scenario_incidents
+                    )
+                ),
+                total_liquidity_shortfall_probability=sum(
+                    scenario.weight
+                    for scenario, scenario_incidents in risky_scenarios
+                    if any(
+                        incident.shortfall_type == ShortfallType.TOTAL_LIQUIDITY
+                        for incident in scenario_incidents
+                    )
+                ),
+                first_risk_date=current_date,
+                shortfall_type=(
+                    ShortfallType.TOTAL_LIQUIDITY
+                    if has_total_liquidity_risk
+                    else ShortfallType.PAYMENT_ACCOUNT
+                ),
+                expected_gap_min=min(incident.gap for incident in incidents),
+                expected_gap_max=max(incident.gap for incident in incidents),
+                days_until_risk=0 if has_carried_shortfall else offset,
+                data_confidence=metrics.data_confidence,
+                has_essential_risk=any(incident.is_essential for incident in incidents),
+                requires_verification=metrics.requires_verification,
+                triggering_event_ids=tuple(
+                    sorted(
+                        {
+                            incident.event_id
+                            for incident in incidents
+                            if incident.event_id is not None
+                        }
+                    )
+                ),
+            )
+        statuses[current_date] = select_risk_status(daily_metrics)
+    return statuses
+
+
+def _with_daily_statuses(
+    snapshot: FinancialSnapshot,
+    scenarios: tuple[ScenarioCashflow, ...],
+    metrics: RiskMetrics,
+) -> tuple[ScenarioCashflow, ...]:
+    statuses = _daily_statuses(snapshot, scenarios, metrics)
+    return tuple(
+        scenario.model_copy(
+            update={
+                "daily_positions": tuple(
+                    position.model_copy(update={"status": statuses[position.date]})
+                    for position in scenario.daily_positions
+                )
+            }
+        )
+        for scenario in scenarios
+    )
+
+
 def simulate_cashflow(
     snapshot: FinancialSnapshot,
     *,
@@ -526,13 +689,15 @@ def simulate_cashflow(
         raise ValueError("delay scenario weights must sum to 1")
     events = _normalized_events(snapshot)
     scenarios = tuple(_simulate_scenario(snapshot, events, scenario) for scenario in DelayScenario)
+    risk_metrics = _risk_metrics(snapshot, scenarios)
+    scenarios = _with_daily_statuses(snapshot, scenarios, risk_metrics)
     on_time = next(scenario for scenario in scenarios if scenario.scenario == DelayScenario.ON_TIME)
     return CashflowAnalysis(
         snapshot_id=snapshot.snapshot_id,
         analysis_horizon_days=ANALYSIS_HORIZON_DAYS,
         daily_positions=on_time.daily_positions,
         scenarios=scenarios,
-        risk_metrics=_risk_metrics(snapshot, scenarios),
+        risk_metrics=risk_metrics,
         seed=seed,
         tool_version=CASHFLOW_TOOL_VERSION,
         model_version=DELAY_MODEL_VERSION,

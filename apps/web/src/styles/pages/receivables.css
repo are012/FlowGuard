@@ -1,0 +1,237 @@
+/* Receivables */
+.receivable-form {
+  display: grid;
+  gap: 38px;
+  grid-template-columns: 0.65fr 1.35fr;
+  margin-bottom: 20px;
+  padding: 27px;
+}
+
+.receivable-form h3 {
+  font-size: 21px;
+  letter-spacing: -0.04em;
+  margin: 4px 0;
+}
+
+.receivable-form > div > p:not(.eyebrow) {
+  color: var(--ink-soft);
+  font-size: 11px;
+  margin: 0;
+}
+
+.receivable-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 19px 21px;
+}
+
+.receivable-summary > div {
+  border-right: 1px solid var(--line);
+  padding: 0 21px;
+}
+
+.receivable-summary > div:first-child {
+  padding-left: 0;
+}
+
+.receivable-summary > div:last-child {
+  border-right: 0;
+}
+
+.receivable-summary span,
+.receivable-summary strong {
+  display: block;
+}
+
+.receivable-summary span {
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.receivable-summary strong {
+  font-size: 17px;
+  letter-spacing: -0.025em;
+  margin-top: 2px;
+}
+
+.receivable-summary .attention strong {
+  color: var(--red);
+}
+
+.receivable-list {
+  display: grid;
+  gap: 13px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.receivable-card {
+  padding: 20px;
+}
+
+.receivable-card.status-overdue {
+  border-color: #e7bcb3;
+  box-shadow: inset 0 3px 0 var(--red);
+}
+
+.receivable-card-main {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.counterparty-mark {
+  align-items: center;
+  background: var(--green-soft);
+  border-radius: 13px;
+  color: var(--green);
+  display: flex;
+  font-size: 14px;
+  font-weight: 850;
+  height: 43px;
+  justify-content: center;
+  width: 43px;
+}
+
+.receivable-title-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.receivable-title-row h3 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.receivable-card-main p {
+  color: var(--ink-muted);
+  font-size: 9px;
+  margin: 2px 0 0;
+}
+
+.receivable-status {
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 800;
+  padding: 4px 7px;
+}
+
+.rs-confirmed,
+.rs-received {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.rs-estimated,
+.rs-unknown {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.rs-overdue {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.rs-cancelled {
+  background: #efefec;
+  color: var(--ink-muted);
+}
+
+.receivable-amount {
+  display: block;
+  font-size: 25px;
+  letter-spacing: -0.045em;
+  margin: 23px 0 19px;
+}
+
+.receivable-evidence {
+  background: var(--surface-soft);
+  border-radius: 14px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 12px;
+}
+
+.receivable-evidence > span {
+  border-right: 1px solid var(--line);
+  padding: 0 9px;
+}
+
+.receivable-evidence > span:last-child {
+  border-right: 0;
+}
+
+.receivable-evidence small,
+.receivable-evidence strong {
+  display: block;
+}
+
+.receivable-evidence small {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.receivable-evidence strong {
+  font-size: 10px;
+  margin-top: 1px;
+}
+
+.confirmation-note {
+  align-items: center;
+  color: var(--yellow);
+  display: flex;
+  font-size: 9px;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+@media (max-width: 1080px) {
+  .receivable-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 860px) {
+  .receivable-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .receivable-form {
+    gap: 21px;
+    padding: 21px 17px;
+  }
+
+  .receivable-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 13px;
+  }
+
+  .receivable-summary > div {
+    border-bottom: 1px solid var(--line);
+    padding: 10px 12px;
+  }
+
+  .receivable-summary > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .receivable-summary > div:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .receivable-summary > div:first-child {
+    padding-left: 12px;
+  }
+
+  .receivable-card {
+    padding: 17px;
+  }
+
+  .receivable-evidence {
+    padding: 10px 5px;
+  }
+}

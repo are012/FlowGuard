@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 from threading import Event, Lock
@@ -23,8 +24,10 @@ from flowguard.ai_contract import (
     AIToBackendResponse,
     BackendToAIRequest,
 )
+from flowguard.observability import configure_logging, log_event
 
 load_dotenv(Path(__file__).resolve().parents[2] / "ai-service" / ".env", override=False)
+logger = logging.getLogger("flowguard.ai_service")
 
 INTERPRETATION_INSTRUCTIONS = """
 You are FlowGuard's interpretation service. Rank and explain only the action
@@ -58,6 +61,7 @@ class InterpretationContent(BaseModel):
 
 
 def create_app(*, openai_client: Any | None = None, model: str | None = None) -> FastAPI:
+    configure_logging()
     app = FastAPI(
         title="FlowGuard AI Interpretation Service",
         version="1.1.0",
@@ -94,6 +98,13 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
             if cached is not None:
                 if cached[0] != fingerprint:
                     raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "ai_service_cache_hit",
+                    analysis_id=request.analysisId,
+                    ai_request_id=request.requestId,
+                )
                 return cached[1]
             pending = in_flight.get(request.idempotencyKey)
             if pending is None:
@@ -143,6 +154,14 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
             with cache_lock:
                 in_flight.pop(request.idempotencyKey, None)
                 completion.set()
+            log_event(
+                logger,
+                logging.ERROR,
+                "ai_service_interpretation_failed",
+                analysis_id=request.analysisId,
+                ai_request_id=request.requestId,
+                exception_type=type(exc).__name__,
+            )
             raise HTTPException(status_code=502, detail="AI interpretation failed") from exc
 
         candidate_ids = {item.actionId for item in request.actionCandidates if item.feasible}
@@ -151,6 +170,14 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
             with cache_lock:
                 in_flight.pop(request.idempotencyKey, None)
                 completion.set()
+            log_event(
+                logger,
+                logging.WARNING,
+                "ai_service_interpretation_rejected",
+                analysis_id=request.analysisId,
+                ai_request_id=request.requestId,
+                error_code="unapproved_action",
+            )
             raise HTTPException(status_code=502, detail="AI returned an unapproved action")
 
         result = AIToBackendResponse(
@@ -176,6 +203,14 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
             response_cache[request.idempotencyKey] = (fingerprint, result)
             in_flight.pop(request.idempotencyKey, None)
             completion.set()
+        log_event(
+            logger,
+            logging.INFO,
+            "ai_service_interpretation_finished",
+            analysis_id=request.analysisId,
+            ai_request_id=request.requestId,
+            ranked_action_count=len(result.rankedActions),
+        )
         return result
 
     return app

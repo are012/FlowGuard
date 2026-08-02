@@ -18,9 +18,9 @@ separate AI service may rank validated candidates and explain them to the user.
 - The investigator invokes the MCP-compatible `CoreToolService` in process. A
   FastMCP entrypoint exists, but no separate MCP process or transport is used in
   the default analysis path.
-- SQLite is the exercised contest-MVP store. `DATABASE_URL` accepts a PostgreSQL
-  SQLAlchemy URL, but a shared PostgreSQL deployment and migrations are part of
-  the expansion profile.
+- SQLite is the exercised contest-MVP store. Alembic owns the versioned schema.
+  `DATABASE_URL` accepts a PostgreSQL SQLAlchemy URL, but a shared PostgreSQL
+  deployment and PostgreSQL integration tests remain part of the expansion profile.
 - Analysis runs synchronously in the MVP while preserving separate financial
   analysis and AI interpretation states. A durable Redis worker is an
   infrastructure extension, not a hidden in-process retry.
@@ -99,7 +99,7 @@ decisions explicit and versioned:
 | Long horizon | Weeks 5–13 are grouped by week; weeks 1–4 retain daily detail |
 | IDs | Generated workflow IDs are UUID-backed strings; imported and API entity IDs remain opaque strings |
 | CSV | UTF-8 wide CSV with `record_type`; legacy transaction-only rows remain valid |
-| Persistence | SQLite is tested; a PostgreSQL URL/driver path exists but production PostgreSQL and migrations are expansion work; no Docker resources are created |
+| Persistence | Alembic-managed SQLite is tested; a PostgreSQL URL/driver path exists but production PostgreSQL remains expansion work; no Docker resources are created |
 | AI interpretation retry | One retry only for documented transient transport and HTTP failures, within a 15-second total budget |
 | Latest report promotion | Only a result matching the latest data revision can become the latest report |
 
@@ -125,6 +125,53 @@ In a third terminal:
 make dev-web
 ```
 
+`make dev-api` first runs `alembic upgrade head`. Run the migration explicitly
+without starting the server with:
+
+```bash
+make migrate
+```
+
+The application API entrypoint does not call SQLAlchemy `create_all`. The
+`FLOWGUARD_AUTO_CREATE_SCHEMA=true` escape hatch is reserved for isolated,
+disposable test databases such as the Playwright in-memory database.
+
+If a local database was created by an older checkout with `create_all`, back it
+up first. Verify that it already matches the current metadata before stamping the
+baseline. `migration-parity` performs this comparison without requiring an
+existing Alembic version stamp. Never stamp a database that reports schema
+differences:
+
+```bash
+make migration-parity
+cd apps/api
+../../.venv/bin/python -m alembic stamp head
+cd ../..
+make migration-check
+```
+
+## Operational safeguards
+
+The API emits JSON application events through Python logging. Every HTTP response
+includes `X-Request-ID`; a valid incoming `X-Request-ID` is reused so request,
+analysis, AI interpretation, and failure events can be correlated. Logs contain
+identifiers, status, timing, attempts, and stable error codes only. Raw CSV,
+financial payloads, balances, credentials, and AI response text are not logged.
+Set `FLOWGUARD_LOG_LEVEL` to control verbosity.
+
+The synchronous MVP applies configurable, per-demo-user sliding-window limits to
+the two costly endpoints:
+
+- `POST /api/v1/imports/transactions`: 10 requests per minute by default;
+- `POST /api/v1/analyses`: 5 requests per minute by default.
+
+Responses expose `RateLimit-Limit`, `RateLimit-Remaining`, and, for HTTP 429,
+`Retry-After`. Configure the limits with the variables in `apps/api/.env.example`.
+This limiter is intentionally process-local and `X-User-ID` is not authenticated,
+so it is a contest-MVP load guard rather than an internet-facing security boundary.
+A shared limiter keyed by authenticated identity is required before multiple API
+workers or an untrusted deployment.
+
 The AI service listens on `http://localhost:8001` and the application API on
 `http://localhost:8000` by default. Without an AI service key, financial analysis
 still completes and exposes the deterministic fallback interpretation.
@@ -141,6 +188,11 @@ local data and analysis artifacts.
 ```bash
 make check
 ```
+
+GitHub Actions runs backend tests, frontend unit tests, linting, formatting,
+type checks, and the production build through `make check` on pushes and pull
+requests. It runs the Playwright walkthrough in a separate job and retains
+browser diagnostics when that job fails.
 
 The browser walkthrough can be verified separately after activating the Python
 virtual environment:
@@ -165,7 +217,7 @@ The following remain outside the exercised MVP validation boundary:
 
 - a live OpenAI key/model smoke test;
 - an automated API-to-AI process success-path integration test;
-- PostgreSQL migrations and integration tests;
+- PostgreSQL migration execution and integration tests;
 - Redis, durable worker recovery, and multi-worker AI idempotency;
 - Docker/Compose deployment; and
 - a process-to-process MCP transport path.

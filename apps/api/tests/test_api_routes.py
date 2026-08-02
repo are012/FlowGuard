@@ -72,6 +72,12 @@ def test_preferences_are_persisted_and_used_by_dashboard(
 
     timeline = client.get("/api/v1/cashflow/timeline").json()
     assert timeline["horizon_days"] == 91
+    valid_statuses = {"STABLE", "VERIFY", "PREPARE", "ACT_NOW"}
+    assert {position["status"] for position in timeline["daily_positions"]} <= valid_statuses
+    assert all(
+        {position["status"] for position in scenario["daily_positions"]} <= valid_statuses
+        for scenario in timeline["scenarios"]
+    )
     assert {scenario["scenario_label"] for scenario in timeline["scenarios"]} == {
         "기준",
         "3일 지연",

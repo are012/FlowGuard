@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
+from flowguard.observability import log_event
 from flowguard.storage import FlowGuardRepository
 
 from .errors import ServiceError
@@ -16,6 +18,7 @@ MAX_TOOL_CALLS = 10
 MAX_CANDIDATE_PLANS = 5
 MAX_EVALUATED_CANDIDATES = 3
 MAX_EXPOSED_ALTERNATIVES = 2
+logger = logging.getLogger("flowguard.policy")
 
 
 class RiskEvidenceBuilder:
@@ -489,6 +492,28 @@ class LiquidityInvestigator:
             for candidate in evaluated_candidates
         ]
         state["actionCandidates"] = evaluated_candidates
+
+        for candidate in evaluated_candidates:
+            policy = candidate.get("policy_result") or {}
+            if policy.get("valid") is True:
+                continue
+            violations = policy.get("violations") or []
+            codes = sorted(
+                {
+                    str(violation.get("code"))
+                    for violation in violations
+                    if isinstance(violation, dict) and violation.get("code")
+                }
+            )
+            log_event(
+                logger,
+                logging.WARNING,
+                "policy_candidate_rejected",
+                analysis_id=analysis_id,
+                action_id=str(candidate.get("action_id", "unknown")),
+                violation_count=len(violations),
+                violation_codes=",".join(codes),
+            )
 
         safe_candidates = [candidate for candidate in evaluated_candidates if candidate["feasible"]]
         if safe_candidates:

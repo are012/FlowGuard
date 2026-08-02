@@ -329,6 +329,7 @@ class DailyPosition(DomainModel):
     total_balance: int
     available_balance: int
     protected_balance: int
+    status: RiskStatus
     triggering_event_ids: tuple[str, ...] = ()
 
 
