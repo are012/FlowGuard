@@ -110,7 +110,15 @@ validate_financial_policy
 규모  2~3일
 ```
 
-**C1·C2를 미루고 진행할 경우**, `TOTAL_BUDGET`을 15초에서 8초로 낮추고 `MAX_PHASES`를 2로 고정해 최악 지연을 억제합니다.
+**C1·C2를 미루고 진행할 경우**에도 `TOTAL_BUDGET`은 `PHASE_TIMEOUT × MAX_PHASES` 보다 커야 합니다.
+
+> **실측 교훈** — 초안은 동기 지연을 억제하려 `TOTAL_BUDGET`을 8초로 낮추라고 적었으나,
+> `PHASE_TIMEOUT 5초 × MAX_PHASES 2 = 10초`가 필요한 구조라 1차 단계가 제한시간을
+> 소진하면 2차가 시작조차 못 했습니다. 그 결과 2차 추가 조사 발생률이 16.7%로 측정되어
+> "2단계 설계 효과 미입증"이라는 **잘못된 판정**이 나왔습니다.
+> 예산을 12초로 고친 뒤 재측정하니 **100%** 로 뒤집혔습니다.
+> 자세한 내용은 `feature/track-b-ai-investigation` 브랜치의
+> `docs/plans/track-b-shadow-results.md` 참조.
 
 ### 3.3 권장 — N5 프롬프트 용어집
 
@@ -246,7 +254,9 @@ class InvestigationConcludeResponse(...): # additionalInvestigations[] | conclus
 MAX_PHASES = 2
 MAX_TOOL_CALLS = 6
 PHASE_TIMEOUT = 5.0
-TOTAL_BUDGET = 15.0   # C1·C2 미완료 시 8.0
+TOOL_EXECUTION_ALLOWANCE = 2.0
+# 단계마다 제한시간을 소진할 수 있으므로 총예산은 그 합보다 커야 한다.
+TOTAL_BUDGET = PHASE_TIMEOUT * MAX_PHASES + TOOL_EXECUTION_ALLOWANCE  # 12.0
 ```
 
 백엔드가 한도를 강제합니다. AI의 자기 신고를 믿지 않습니다.
@@ -338,7 +348,7 @@ C1·C2를 포함하면 12일입니다. 본선(9월 2일)까지 3주이므로 여
 | 조사 다양성 | 서로 다른 입력에서 도구 조합 3종 이상 | 턴 기록 집계 |
 | 결론 재현성 | 재생 시 최종 수치 100% 일치 | 재생 테스트 |
 | 회귀 | AI 미설정 시 기존 276개 전부 통과 | CI |
-| 분석 소요 | AI 연결 시 15초 이내 (동기 유지 시 8초) | 실측 |
+| 분석 소요 | 동기 유지 시 15초 이내 · 비동기 전환 시 응답 1초 이내 | 실측 |
 
 **2차 추가 조사 발생률이 핵심입니다.** 이 값이 0에 가까우면 AI가 관찰에 반응하지 않는다는 뜻이고, 그러면 2단계 설계를 택한 이유가 사라집니다. 그 경우 단발성 계획으로 축소하는 것이 옳은 결론입니다.
 
