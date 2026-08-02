@@ -238,7 +238,8 @@ def test_completed_analysis_does_not_block_a_later_rerun(
 def test_different_explicit_analysis_times_are_not_coalesced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    orchestrator = AnalysisOrchestrator(FlowGuardRepository("sqlite:///:memory:"))
+    repository = FlowGuardRepository("sqlite:///:memory:")
+    orchestrator = AnalysisOrchestrator(repository)
     owners_ready = Barrier(2)
     counter_lock = Lock()
     execution_count = 0
@@ -258,6 +259,7 @@ def test_different_explicit_analysis_times_are_not_coalesced(
             "trigger_type": trigger_type,
         }
 
+    monkeypatch.setattr(repository, "current_state_revision", lambda _user_id: "rev-7")
     monkeypatch.setattr(orchestrator, "_run_once", run_once)
     first_as_of = datetime.fromisoformat("2026-07-31T09:00:00+09:00")
     second_as_of = datetime.fromisoformat("2026-08-01T09:00:00+09:00")
