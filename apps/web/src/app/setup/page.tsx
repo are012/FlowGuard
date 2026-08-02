@@ -5,7 +5,7 @@ import { useMemo, useRef, useState } from "react";
 import { AnalysisProgress } from "@/components/analysis-progress";
 import { Icon } from "@/components/icons";
 import { PageIntro } from "@/components/ui";
-import { apiRequest, listFrom, useRemote } from "@/lib/api";
+import { apiRequest, listFrom, useRemote, waitForAnalysis } from "@/lib/api";
 import type {
   Account,
   AnalysisResponse,
@@ -372,7 +372,16 @@ export default function SetupPage() {
             ...(analysisAsOf ? { as_of: analysisAsOf } : {}),
           }),
         });
-        setAnalysisResult(response);
+        // 서버가 비동기 모드면 202 와 함께 QUEUED 만 돌아온다.
+        // 그때는 대시보드 상태로 완료를 기다린다.
+        if (response.analysis_status === "QUEUED" && !response.analysis_id) {
+          const finished = await waitForAnalysis<AnalysisResponse>({
+            onProgress: (snapshot) => setAnalysisResult(snapshot),
+          });
+          setAnalysisResult(finished ?? response);
+        } else {
+          setAnalysisResult(response);
+        }
       } else {
         setAnalysisResult({
           status: "COMPLETED",
@@ -520,7 +529,9 @@ export default function SetupPage() {
             />
           )}
 
-          {analyzing && <AnalysisProgress />}
+          {analyzing && (
+            <AnalysisProgress executionStage={analysisResult?.execution_stage} />
+          )}
 
           {analysisResult && (
             <SetupCompleteStep
