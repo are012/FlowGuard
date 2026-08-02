@@ -1,7 +1,7 @@
 # 트랙 A 효과 검증 계획
 
 작성 기준: `feature/ai-label-classification` (`48bfc54`)
-선행 문서: [PLAN-ai-investigation.md](PLAN-ai-investigation.md) 트랙 A · [BACKLOG.md](BACKLOG.md)
+선행 문서: [ai-role-expansion.md](ai-role-expansion.md) 트랙 A · [BACKLOG.md](../BACKLOG.md)
 
 ---
 
@@ -205,7 +205,7 @@ FLOWGUARD_AI_CLASSIFICATION_MIN_CONFIDENCE=HIGH|MEDIUM|LOW
 
 **A를 권합니다.** 사용자가 확인·수정하는 단계가 이미 있으므로, AI 제안을 기본값으로 채워두면 입력 부담이 줄고 계산 안전성은 유지됩니다. 그리고 이 값이 **E3 세금 캘린더**의 입력으로 쓰일 수 있어 버리기 아깝습니다.
 
-결정 후 `PLAN-ai-investigation.md` A3에 용도를 명시합니다.
+결정 후 `docs/plans/ai-role-expansion.md` A3에 용도를 명시합니다.
 
 ### 규모
 
@@ -240,7 +240,7 @@ AI 순증분(C2 − C1)이 유의미
 
 ## 7. 병렬 진행 가능한 항목
 
-트랙 A 검증과 무관하게 독립적으로 진행할 수 있는 것들입니다. [BACKLOG.md](BACKLOG.md) 참조.
+트랙 A 검증과 무관하게 독립적으로 진행할 수 있는 것들입니다. [BACKLOG.md](../BACKLOG.md) 참조.
 
 | 항목 | 규모 | 비고 |
 |---|---|---|
@@ -257,7 +257,7 @@ AI 순증분(C2 − C1)이 유의미
 
 ## 8. 트랙 B 착수 조건
 
-[PLAN-ai-investigation.md](PLAN-ai-investigation.md) 트랙 B는 다음이 모두 충족된 뒤 시작합니다.
+[ai-role-expansion.md](ai-role-expansion.md) 트랙 B는 다음이 모두 충족된 뒤 시작합니다.
 
 ```text
 1  트랙 A 검증 완료 및 판정 (본 문서 6절 종료 조건)

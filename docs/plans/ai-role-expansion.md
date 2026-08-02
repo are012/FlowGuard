@@ -1,7 +1,7 @@
 # AI 역할 확장 설계
 
 작성 기준: `feature/backlog-existing-improvements` (`caff94c`)
-관련 항목: [BACKLOG.md](BACKLOG.md) S1
+관련 항목: [BACKLOG.md](../BACKLOG.md) S1
 
 ---
 

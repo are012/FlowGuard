@@ -5,6 +5,9 @@
 - `README.md`: Defines the product vision, user experience, and MVP scope.
 - `ARCHITECTURE.md`: Defines the system architecture, component responsibilities, and execution flows.
 - `SPECIFICATION.md`: Defines the implementation requirements, constraints, and authoritative scope.
+- `DEVELOPMENT.md`: Defines local setup, validation commands, and operational safeguards.
+- `docs/BACKLOG.md`: Tracks verified improvement items and resolved history.
+- `docs/plans/`: Holds in-progress design documents. Not authoritative until implemented.
 
 If documents conflict, follow this order of precedence: `SPECIFICATION.md` → `ARCHITECTURE.md` → `README.md`.
 

@@ -1,10 +1,48 @@
-# FlowGuard AI 사용자 중심 최종 기획안
+# FlowGuard AI
 
-> 이 문서를 기준으로 한 실행 가능한 MVP는 `apps/api`와 `apps/web`에 있으며, 선택적
-> AI 분류·해석 프로세스 진입점은 [`apps/ai-service`](apps/ai-service/README.md)에 있습니다.
-> 로컬 실행, 검증 방법과 명세의 `TBD` 결정 사항은 [DEVELOPMENT.md](DEVELOPMENT.md)를 참고하세요.
-> 현재 동기·SQLite·in-process 실행 프로필과 worker·PostgreSQL·Redis 확장 목표는
-> [ARCHITECTURE.md](ARCHITECTURE.md)에서 구분해 설명합니다.
+> **월급날이 없어도, 오늘 쓸 수 있는 돈은 알 수 있도록**
+>
+> 수입의 금액과 입금일이 일정하지 않은 프리랜서·1인 사업자를 위한 유동성 관리 서비스입니다.
+> 계좌·카드·예정 수입·할부·고정지출을 분석해 **오늘 안심하고 쓸 수 있는 돈**과
+> **지금 해야 할 가장 부담이 적은 행동**을 알려줍니다.
+
+## 빠른 실행
+
+```bash
+make install        # Python venv + npm 의존성
+make migrate        # DB 스키마 생성 (SQLite 기본)
+
+make dev-api        # http://localhost:8000
+make dev-web        # http://localhost:3000
+```
+
+웹 화면에서 `apps/web/public/samples/flowguard-synthetic-transactions.csv`를 업로드하면
+전체 흐름을 확인할 수 있습니다. **OpenAI 키 없이도 모든 금융 분석이 정상 동작합니다.**
+
+AI 해석을 함께 보려면 키를 설정한 뒤 별도 프로세스를 띄웁니다.
+
+```bash
+cp apps/ai-service/.env.example apps/ai-service/.env   # OPENAI_API_KEY 입력
+make install-ai
+make dev-ai         # http://localhost:8001
+```
+
+검증은 `make check`(백엔드·프런트 정적검사·테스트)와
+`npm --prefix apps/web run test:e2e`(브라우저 시나리오)로 실행합니다.
+
+## 문서 안내
+
+| 문서 | 내용 |
+|---|---|
+| **README.md** (이 문서) | 제품 기획 — 문제 정의 · 타깃 · 기능 · 사용자 흐름 · 비즈니스 모델 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 시스템 구조와 실행 흐름. 현재 MVP 프로필과 확장 목표를 구분해 서술 |
+| [SPECIFICATION.md](SPECIFICATION.md) | 구현 명세 — 데이터 규칙 · 계약 · MCP 도구 · API · 실패 처리 |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | 로컬 실행, 검증 방법, 운영 안전장치 |
+| [docs/BACKLOG.md](docs/BACKLOG.md) | 검증으로 확인한 개선 목록과 해결 기록 |
+| [docs/plans/](docs/plans/) | 진행 중인 설계 문서 |
+
+실행 가능한 MVP는 `apps/api`(FastAPI)와 `apps/web`(Next.js)에 있으며,
+선택적 AI 프로세스 진입점은 [`apps/ai-service`](apps/ai-service/README.md)에 있습니다.
 
 ---
 
