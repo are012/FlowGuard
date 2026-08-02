@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime
+from threading import Event, Lock
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
+from zoneinfo import ZoneInfo
 
 from flowguard.config import (
     AI_CONNECT_TIMEOUT_SECONDS,
@@ -51,6 +54,14 @@ STATUS_MESSAGES = {
     "FAILED": "분석에 실패했습니다.",
 }
 logger = logging.getLogger("flowguard.analysis")
+_OMITTED_AS_OF = object()
+
+
+@dataclass(slots=True)
+class _AnalysisInFlight:
+    completion: Event
+    response: dict[str, Any] | None = None
+    exception: BaseException | None = None
 
 
 class AnalysisOrchestrator:
@@ -70,6 +81,8 @@ class AnalysisOrchestrator:
         self.tools = tools or CoreToolService(repository)
         self.investigator = investigator or LiquidityInvestigator(repository, self.tools)
         self.cashflow_service = CashflowAnalysisService(self.tools)
+        self._in_flight_lock = Lock()
+        self._in_flight: dict[tuple[str, str, str, object], _AnalysisInFlight] = {}
         self.ai_client = ai_client or AIInterpretationClient(
             base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001"),
             connect_timeout_seconds=float(
@@ -90,6 +103,61 @@ class AnalysisOrchestrator:
         *,
         trigger_type: str = "MANUAL",
         as_of: datetime | None = None,
+    ) -> dict[str, Any]:
+        request_key = (
+            user_id,
+            self.repository.current_state_revision(user_id),
+            trigger_type,
+            self._as_of_key(as_of),
+        )
+        with self._in_flight_lock:
+            pending = self._in_flight.get(request_key)
+            if pending is None:
+                pending = _AnalysisInFlight(completion=Event())
+                self._in_flight[request_key] = pending
+                owns_request = True
+            else:
+                owns_request = False
+
+        if not owns_request:
+            pending.completion.wait()
+            with self._in_flight_lock:
+                response = pending.response
+                exception = pending.exception
+            if exception is not None:
+                raise exception
+            if response is None:
+                raise RuntimeError("analysis owner completed without a response")
+            return response
+
+        try:
+            response = self._run_once(user_id, trigger_type=trigger_type, as_of=as_of)
+            with self._in_flight_lock:
+                pending.response = response
+            return response
+        except BaseException as exc:
+            with self._in_flight_lock:
+                pending.exception = exc
+            raise
+        finally:
+            with self._in_flight_lock:
+                self._in_flight.pop(request_key, None)
+                pending.completion.set()
+
+    @staticmethod
+    def _as_of_key(as_of: datetime | None) -> object:
+        if as_of is None:
+            return _OMITTED_AS_OF
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            return as_of.isoformat()
+        return as_of.astimezone(ZoneInfo("Asia/Seoul")).isoformat()
+
+    def _run_once(
+        self,
+        user_id: str,
+        *,
+        trigger_type: str,
+        as_of: datetime | None,
     ) -> dict[str, Any]:
         analysis_revision: str | None = None
         run = self.repository.create_analysis(
