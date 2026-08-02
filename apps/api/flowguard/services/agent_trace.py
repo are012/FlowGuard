@@ -8,6 +8,11 @@ TRACE_DISCLOSURE = (
     "이 기록은 숨겨진 모델 추론이 아니라 확인한 근거, 도구 호출, "
     "후보 평가와 최종 선택 이유를 요약한 공개 감사 기록입니다."
 )
+_AI_INVESTIGATION_TOOLS = {
+    "get_financial_context",
+    "get_counterparty_evidence",
+    "query_financial_events",
+}
 
 
 def build_decision_trace(
@@ -31,21 +36,25 @@ def build_decision_trace(
         tool_name: str | None = None,
         candidate_id: str | None = None,
         evidence_ids: list[str] | None = None,
+        source: str | None = None,
+        phase: int | None = None,
+        reason: str | None = None,
     ) -> None:
         nonlocal sequence
         sequence += 1
-        steps.append(
-            {
-                "sequence": sequence,
-                "kind": kind,
-                "title": title,
-                "summary": summary,
-                "status": status,
-                "tool_name": tool_name,
-                "candidate_id": candidate_id,
-                "evidence_ids": evidence_ids or [],
-            }
-        )
+        step = {
+            "sequence": sequence,
+            "kind": kind,
+            "title": title,
+            "summary": summary,
+            "status": status,
+            "tool_name": tool_name,
+            "candidate_id": candidate_id,
+            "evidence_ids": evidence_ids or [],
+        }
+        if source is not None:
+            step.update({"source": source, "phase": phase, "reason": reason})
+        steps.append(step)
 
     risk = state.get("risk") or {}
     hypotheses = state.get("risk_hypotheses") or []
@@ -73,6 +82,75 @@ def build_decision_trace(
             "현재 스냅숏에서 대응이 필요한 유동성 부족을 찾지 못했습니다.",
         )
 
+    investigation = state.get("investigation") or {}
+    observations = investigation.get("observations") or []
+    successful_observation_count = len(observations) if isinstance(observations, list) else 0
+    if mode in {"AI_INVESTIGATED", "AI_PARTIAL"}:
+        request_index = 0
+        for request in state.get("investigation_trace", []):
+            if not isinstance(request, dict) or request.get("source") != "AI":
+                continue
+            tool_name = request.get("tool")
+            phase = request.get("phase")
+            reason = request.get("reason")
+            if (
+                not isinstance(tool_name, str)
+                or tool_name not in _AI_INVESTIGATION_TOOLS
+                or not isinstance(phase, int)
+                or isinstance(phase, bool)
+                or phase not in {1, 2}
+                or not isinstance(reason, str)
+                or not reason
+            ):
+                continue
+            summary = _tool_summary(tool_name, has_error=False)
+            status = "COMPLETED"
+            if mode == "AI_PARTIAL":
+                if request_index < successful_observation_count:
+                    status = "AUDIT_ONLY"
+                    summary = (
+                        f"{summary} 다만 AI 조사가 부분 완료되어 이 관찰은 감사 기록으로만 "
+                        "보존하고 최종 결정 근거에는 사용하지 않았습니다."
+                    )
+                else:
+                    status = "FAILED"
+                    summary = _tool_summary(tool_name, has_error=True)
+            add_step(
+                "TOOL_CALL",
+                _tool_title(tool_name),
+                summary,
+                status=status,
+                tool_name=tool_name,
+                source="AI",
+                phase=phase,
+                reason=reason,
+            )
+            request_index += 1
+
+    if mode == "AI_INVESTIGATED":
+        for hypothesis in hypotheses:
+            if hypothesis.get("source") != "AI_INVESTIGATION":
+                continue
+            summary = hypothesis.get("summary")
+            if not isinstance(summary, str) or not summary:
+                continue
+            add_step(
+                "RISK_HYPOTHESIS",
+                "AI 조사 가설 정리",
+                summary,
+                evidence_ids=[
+                    str(item)
+                    for item in (
+                        hypothesis.get("triggering_event_ids")
+                        or hypothesis.get("evidence_ids")
+                        or []
+                    )
+                ],
+                source="AI",
+                phase=2,
+                reason=summary,
+            )
+
     for execution in state.get("tool_calls", []):
         tool_name = str(execution.get("tool_name", "unknown_tool"))
         has_error = bool(execution.get("error"))
@@ -83,6 +161,12 @@ def build_decision_trace(
             status="FAILED" if has_error else "COMPLETED",
             tool_name=tool_name,
         )
+
+    unresolved = (
+        [str(item) for item in investigation.get("unresolved") or []]
+        if mode in {"AI_INVESTIGATED", "AI_PARTIAL"}
+        else []
+    )
 
     evaluated = state.get("actionCandidates") or []
     if not evaluated:
@@ -131,7 +215,7 @@ def build_decision_trace(
             status="NEEDS_REVIEW",
         )
 
-    return {
+    trace = {
         "mode": mode,
         "model": model,
         "status": "COMPLETED",
@@ -140,6 +224,9 @@ def build_decision_trace(
         "steps": steps,
         "usage": None,
     }
+    if unresolved:
+        trace["unresolved_questions"] = unresolved
+    return trace
 
 
 def _tool_title(tool_name: str) -> str:

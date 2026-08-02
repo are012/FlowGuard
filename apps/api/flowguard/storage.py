@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -81,6 +83,60 @@ ANALYSIS_TRANSITIONS = {
     "INTERPRETATION_VALIDATING": {"COMPLETED", "FAILED"},
     "COMPLETED": set(),
     "FAILED": set(),
+}
+
+INVESTIGATION_TERMINAL_STATUSES = {
+    "SUCCEEDED",
+    "PARTIAL",
+    "REJECTED",
+    "FAILED",
+}
+
+INVESTIGATION_AUDIT_FORBIDDEN_KEYS = {
+    "accounts",
+    "cards",
+    "scheduled_events",
+    "protected_funds",
+    "description",
+    "event_type",
+    "expected_date",
+    "counterparty_name",
+    "counterpartyName",
+    "account_id",
+    "accountId",
+    "account_name",
+    "accountName",
+    "card_id",
+    "cardId",
+    "card_name",
+    "cardName",
+    "source_reference_id",
+    "sourceReferenceId",
+}
+
+INVESTIGATION_COUNTERPARTY_RESULT_KEYS = {
+    "counterparty_id",
+    "payment_history_count",
+    "on_time_rate",
+    "average_delay_days",
+    "median_delay_days",
+    "maximum_delay_days",
+    "recent_trend",
+    "data_confidence",
+}
+
+INVESTIGATION_EVENT_RESULT_KEYS = {
+    "event_id",
+    "type",
+    "date",
+    "amount",
+    "is_essential",
+}
+
+INVESTIGATION_CONTEXT_RESULT_KEYS = {
+    "account_count",
+    "protected_funds_total",
+    "essential_scheduled_events_total",
 }
 
 
@@ -299,6 +355,88 @@ class AIClassificationRunRow(Base):
         DateTime(timezone=True), nullable=False, default=utc_now
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AIInvestigationRunRow(Base):
+    __tablename__ = "ai_investigation_runs"
+
+    investigation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    analysis_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.analysis_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("financial_snapshots.snapshot_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    snapshot_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tool_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    additional_investigation_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    hypotheses: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    priorities: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    unresolved: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    observations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+    turns: Mapped[list[AIInvestigationTurnRow]] = relationship(
+        back_populates="investigation",
+        order_by="AIInvestigationTurnRow.turn_sequence",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class AIInvestigationTurnRow(Base):
+    __tablename__ = "ai_investigation_turns"
+
+    turn_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    investigation_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_investigation_runs.investigation_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    turn_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase: Mapped[int] = mapped_column(Integer, nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    response_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    investigation: Mapped[AIInvestigationRunRow] = relationship(back_populates="turns")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "investigation_id",
+            "turn_sequence",
+            name="uq_ai_investigation_turn_sequence",
+        ),
+    )
 
 
 class RecommendationRow(Base):
@@ -793,6 +931,24 @@ class FlowGuardRepository:
                     select(AnalysisRunRow.analysis_id).where(AnalysisRunRow.user_id == user_id)
                 )
             )
+            investigation_ids = list(
+                session.scalars(
+                    select(AIInvestigationRunRow.investigation_id).where(
+                        AIInvestigationRunRow.user_id == user_id
+                    )
+                )
+            )
+            if investigation_ids:
+                session.execute(
+                    delete(AIInvestigationTurnRow).where(
+                        AIInvestigationTurnRow.investigation_id.in_(investigation_ids)
+                    )
+                )
+                session.execute(
+                    delete(AIInvestigationRunRow).where(
+                        AIInvestigationRunRow.investigation_id.in_(investigation_ids)
+                    )
+                )
             session.execute(
                 delete(AIClassificationRunRow).where(AIClassificationRunRow.user_id == user_id)
             )
@@ -1579,6 +1735,386 @@ class FlowGuardRepository:
             )
             return self._classification_dict(row) if row is not None else None
 
+    def create_or_get_investigation_run(
+        self,
+        *,
+        analysis_id: str,
+        user_id: str,
+        snapshot_id: str,
+        snapshot_revision: str,
+        request_id: str,
+        idempotency_key: str,
+        schema_version: str,
+        contract_version: str,
+        prompt_version: str,
+        mode: str,
+        model_name: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        if mode not in {"SHADOW", "ON"}:
+            raise StorageError(f"unsupported investigation mode {mode}")
+        identity = {
+            "analysis_id": analysis_id,
+            "user_id": user_id,
+            "snapshot_id": snapshot_id,
+            "snapshot_revision": snapshot_revision,
+            "request_id": request_id,
+            "schema_version": schema_version,
+            "contract_version": contract_version,
+            "prompt_version": prompt_version,
+            "mode": mode,
+        }
+        try:
+            with self._session() as session:
+                existing = session.scalar(
+                    select(AIInvestigationRunRow).where(
+                        AIInvestigationRunRow.idempotency_key == idempotency_key
+                    )
+                )
+                if existing is not None:
+                    self._assert_investigation_identity(existing, identity)
+                    return self._investigation_dict(existing), False
+                analysis = session.get(AnalysisRunRow, analysis_id)
+                if analysis is None:
+                    raise RecordNotFound(f"analysis:{analysis_id} not found")
+                if analysis.user_id != user_id:
+                    raise StorageConflict("investigation run belongs to another user")
+                if analysis.snapshot_id != snapshot_id:
+                    raise StorageConflict("investigation snapshot does not match its analysis")
+                row = AIInvestigationRunRow(
+                    investigation_id=f"investigation-{uuid4()}",
+                    analysis_id=analysis_id,
+                    user_id=user_id,
+                    snapshot_id=snapshot_id,
+                    snapshot_revision=snapshot_revision,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                    schema_version=schema_version,
+                    contract_version=contract_version,
+                    prompt_version=prompt_version,
+                    mode=mode,
+                    status="IN_PROGRESS",
+                    model_name=model_name,
+                    hypotheses=[],
+                    priorities=[],
+                    unresolved=[],
+                    observations=[],
+                )
+                session.add(row)
+                session.flush()
+                return self._investigation_dict(row), True
+        except IntegrityError as exc:
+            with self._session() as session:
+                existing = session.scalar(
+                    select(AIInvestigationRunRow).where(
+                        AIInvestigationRunRow.idempotency_key == idempotency_key
+                    )
+                )
+                if existing is None:
+                    raise StorageConflict(
+                        "could not resolve investigation idempotency race"
+                    ) from exc
+                self._assert_investigation_identity(existing, identity)
+                return self._investigation_dict(existing), False
+
+    def complete_investigation_run(
+        self,
+        investigation_id: str,
+        *,
+        status: str,
+        observations: Iterable[Mapping[str, Any]],
+        hypotheses: Iterable[Mapping[str, Any]],
+        priorities: Iterable[str],
+        unresolved: Iterable[str],
+        tool_call_count: int,
+        total_latency_ms: int,
+        additional_investigation_requested: bool,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"SUCCEEDED", "PARTIAL"}:
+            raise StorageError(f"unsupported completed investigation status {status}")
+        if status == "SUCCEEDED" and error_code is not None:
+            raise StorageError("successful investigation cannot have an error code")
+        if status == "PARTIAL" and not error_code:
+            raise StorageError("partial investigation requires an error code")
+        return self._finish_investigation_run(
+            investigation_id,
+            status=status,
+            observations=observations,
+            hypotheses=hypotheses,
+            priorities=priorities,
+            unresolved=unresolved,
+            tool_call_count=tool_call_count,
+            total_latency_ms=total_latency_ms,
+            additional_investigation_requested=additional_investigation_requested,
+            error_code=error_code,
+        )
+
+    def fail_investigation_run(
+        self,
+        investigation_id: str,
+        *,
+        status: str,
+        observations: Iterable[Mapping[str, Any]],
+        tool_call_count: int,
+        total_latency_ms: int,
+        additional_investigation_requested: bool,
+        error_code: str,
+    ) -> dict[str, Any]:
+        if status not in {"REJECTED", "FAILED"}:
+            raise StorageError(f"unsupported failed investigation status {status}")
+        if not error_code:
+            raise StorageError("failed investigation requires an error code")
+        return self._finish_investigation_run(
+            investigation_id,
+            status=status,
+            observations=observations,
+            hypotheses=(),
+            priorities=(),
+            unresolved=(),
+            tool_call_count=tool_call_count,
+            total_latency_ms=total_latency_ms,
+            additional_investigation_requested=additional_investigation_requested,
+            error_code=error_code,
+        )
+
+    def record_investigation_turn(
+        self,
+        *,
+        investigation_id: str,
+        turn_sequence: int,
+        phase: int,
+        endpoint: str,
+        status: str,
+        request_payload: Mapping[str, Any],
+        response_payload: Mapping[str, Any],
+        error_code: str | None,
+        attempt_count: int,
+        latency_ms: int,
+    ) -> dict[str, Any]:
+        if type(turn_sequence) is not int or not 1 <= turn_sequence <= 3:
+            raise StorageError("investigation turn_sequence must be between 1 and 3")
+        if type(phase) is not int or phase not in {1, 2}:
+            raise StorageError("investigation phase must be 1 or 2")
+        if (turn_sequence == 1) != (phase == 1):
+            raise StorageError("investigation turn sequence does not match its phase")
+        expected_endpoint = "/investigate/plan" if phase == 1 else "/investigate/conclude"
+        if endpoint != expected_endpoint:
+            raise StorageError("investigation endpoint does not match its phase")
+        if status not in {"SUCCEEDED", "REJECTED", "FAILED"}:
+            raise StorageError(f"unsupported investigation turn status {status}")
+        if status == "SUCCEEDED" and error_code is not None:
+            raise StorageError("successful investigation turn cannot have an error code")
+        if status != "SUCCEEDED" and not error_code:
+            raise StorageError("failed investigation turn requires an error code")
+        if type(attempt_count) is not int or attempt_count < 0:
+            raise StorageError("investigation attempt_count cannot be negative")
+        if type(latency_ms) is not int or latency_ms < 0:
+            raise StorageError("investigation latency_ms cannot be negative")
+        clean_request = self._investigation_json_mapping(
+            request_payload,
+            field="request_payload",
+        )
+        clean_response = self._investigation_json_mapping(
+            response_payload,
+            field="response_payload",
+        )
+        identity = {
+            "phase": phase,
+            "endpoint": endpoint,
+            "status": status,
+            "request_payload": clean_request,
+            "response_payload": clean_response,
+            "error_code": error_code,
+            "attempt_count": attempt_count,
+            "latency_ms": latency_ms,
+        }
+        try:
+            with self._session() as session:
+                open_run = session.execute(
+                    update(AIInvestigationRunRow)
+                    .where(
+                        AIInvestigationRunRow.investigation_id == investigation_id,
+                        AIInvestigationRunRow.status == "IN_PROGRESS",
+                    )
+                    .values(updated_at=AIInvestigationRunRow.updated_at)
+                    .execution_options(synchronize_session=False)
+                )
+                if open_run.rowcount != 1:
+                    existing = session.scalar(
+                        select(AIInvestigationTurnRow).where(
+                            AIInvestigationTurnRow.investigation_id == investigation_id,
+                            AIInvestigationTurnRow.turn_sequence == turn_sequence,
+                        )
+                    )
+                    if existing is not None:
+                        self._assert_investigation_turn_identity(existing, identity)
+                        return self._investigation_turn_dict(existing)
+                    run = session.get(AIInvestigationRunRow, investigation_id)
+                    if run is None:
+                        raise RecordNotFound(f"investigation:{investigation_id} not found")
+                    raise StorageConflict("investigation terminal status is immutable")
+                existing = session.scalar(
+                    select(AIInvestigationTurnRow).where(
+                        AIInvestigationTurnRow.investigation_id == investigation_id,
+                        AIInvestigationTurnRow.turn_sequence == turn_sequence,
+                    )
+                )
+                if existing is not None:
+                    self._assert_investigation_turn_identity(existing, identity)
+                    return self._investigation_turn_dict(existing)
+                previous_sequence = session.scalar(
+                    select(func.max(AIInvestigationTurnRow.turn_sequence)).where(
+                        AIInvestigationTurnRow.investigation_id == investigation_id
+                    )
+                )
+                if turn_sequence != (previous_sequence or 0) + 1:
+                    raise StorageConflict("investigation turns must be recorded in order")
+                row = AIInvestigationTurnRow(
+                    turn_id=f"investigation-turn-{uuid4()}",
+                    investigation_id=investigation_id,
+                    turn_sequence=turn_sequence,
+                    **identity,
+                )
+                session.add(row)
+                session.flush()
+                return self._investigation_turn_dict(row)
+        except IntegrityError as exc:
+            with self._session() as session:
+                existing = session.scalar(
+                    select(AIInvestigationTurnRow).where(
+                        AIInvestigationTurnRow.investigation_id == investigation_id,
+                        AIInvestigationTurnRow.turn_sequence == turn_sequence,
+                    )
+                )
+                if existing is None:
+                    raise StorageConflict(
+                        "could not resolve investigation turn sequence race"
+                    ) from exc
+                self._assert_investigation_turn_identity(existing, identity)
+                return self._investigation_turn_dict(existing)
+
+    def get_investigation_run(self, investigation_id: str) -> dict[str, Any]:
+        with self._session() as session:
+            row = session.get(AIInvestigationRunRow, investigation_id)
+            if row is None:
+                raise RecordNotFound(f"investigation:{investigation_id} not found")
+            return self._investigation_dict(row)
+
+    def list_investigation_runs(
+        self,
+        user_id: str,
+        *,
+        analysis_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._session() as session:
+            statement = select(AIInvestigationRunRow).where(
+                AIInvestigationRunRow.user_id == user_id
+            )
+            if analysis_id is not None:
+                statement = statement.where(AIInvestigationRunRow.analysis_id == analysis_id)
+            rows = session.scalars(
+                statement.order_by(AIInvestigationRunRow.created_at.desc())
+            ).all()
+            return [self._investigation_dict(row) for row in rows]
+
+    def list_investigation_turns(self, investigation_id: str) -> list[dict[str, Any]]:
+        with self._session() as session:
+            if session.get(AIInvestigationRunRow, investigation_id) is None:
+                raise RecordNotFound(f"investigation:{investigation_id} not found")
+            rows = session.scalars(
+                select(AIInvestigationTurnRow)
+                .where(AIInvestigationTurnRow.investigation_id == investigation_id)
+                .order_by(AIInvestigationTurnRow.turn_sequence)
+            ).all()
+            return [self._investigation_turn_dict(row) for row in rows]
+
+    def _finish_investigation_run(
+        self,
+        investigation_id: str,
+        *,
+        status: str,
+        observations: Iterable[Mapping[str, Any]],
+        hypotheses: Iterable[Mapping[str, Any]],
+        priorities: Iterable[str],
+        unresolved: Iterable[str],
+        tool_call_count: int,
+        total_latency_ms: int,
+        additional_investigation_requested: bool,
+        error_code: str | None,
+    ) -> dict[str, Any]:
+        if status not in INVESTIGATION_TERMINAL_STATUSES:
+            raise StorageError(f"unsupported investigation status {status}")
+        if type(tool_call_count) is not int or tool_call_count < 0:
+            raise StorageError("investigation tool_call_count cannot be negative")
+        if type(total_latency_ms) is not int or total_latency_ms < 0:
+            raise StorageError("investigation total_latency_ms cannot be negative")
+        if type(additional_investigation_requested) is not bool:
+            raise StorageError("additional_investigation_requested must be boolean")
+        clean_observations = self._investigation_json_list(
+            observations,
+            field="observations",
+            item_type=dict,
+        )
+        self._reject_forbidden_investigation_keys(clean_observations)
+        self._validate_projected_investigation_observations(clean_observations)
+        clean_hypotheses = self._investigation_json_list(
+            hypotheses,
+            field="hypotheses",
+            item_type=dict,
+        )
+        clean_priorities = self._investigation_json_list(
+            priorities,
+            field="priorities",
+            item_type=str,
+        )
+        clean_unresolved = self._investigation_json_list(
+            unresolved,
+            field="unresolved",
+            item_type=str,
+        )
+        if status == "SUCCEEDED" and not clean_hypotheses:
+            raise StorageError("successful investigation requires hypotheses")
+        if tool_call_count < len(clean_observations):
+            raise StorageError("investigation observations exceed its tool call count")
+        expected = {
+            "status": status,
+            "observations": clean_observations,
+            "hypotheses": clean_hypotheses,
+            "priorities": clean_priorities,
+            "unresolved": clean_unresolved,
+            "tool_call_count": tool_call_count,
+            "total_latency_ms": total_latency_ms,
+            "additional_investigation_requested": additional_investigation_requested,
+            "error_code": error_code,
+        }
+        with self._session() as session:
+            row = session.get(AIInvestigationRunRow, investigation_id, with_for_update=True)
+            if row is None:
+                raise RecordNotFound(f"investigation:{investigation_id} not found")
+            if row.status in INVESTIGATION_TERMINAL_STATUSES:
+                self._assert_idempotent_investigation_update(row, expected)
+                return self._investigation_dict(row)
+            if row.status != "IN_PROGRESS":
+                raise StorageConflict("investigation status cannot be completed")
+            completed_at = utc_now()
+            transitioned = session.execute(
+                update(AIInvestigationRunRow)
+                .where(
+                    AIInvestigationRunRow.investigation_id == investigation_id,
+                    AIInvestigationRunRow.status == "IN_PROGRESS",
+                )
+                .values(
+                    **expected,
+                    completed_at=completed_at,
+                    updated_at=completed_at,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if transitioned.rowcount != 1:
+                raise StorageConflict("investigation terminal transition lost a concurrent race")
+            session.expire(row)
+            return self._investigation_dict(row)
+
     def save_recommendation(
         self,
         *,
@@ -1823,6 +2359,261 @@ class FlowGuardRepository:
             "created_at": row.created_at.isoformat(),
             "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         }
+
+    @staticmethod
+    def _investigation_dict(row: AIInvestigationRunRow) -> dict[str, Any]:
+        return {
+            "investigation_id": row.investigation_id,
+            "analysis_id": row.analysis_id,
+            "user_id": row.user_id,
+            "snapshot_id": row.snapshot_id,
+            "snapshot_revision": row.snapshot_revision,
+            "request_id": row.request_id,
+            "idempotency_key": row.idempotency_key,
+            "schema_version": row.schema_version,
+            "contract_version": row.contract_version,
+            "prompt_version": row.prompt_version,
+            "mode": row.mode,
+            "status": row.status,
+            "model_name": row.model_name,
+            "error_code": row.error_code,
+            "tool_call_count": row.tool_call_count,
+            "total_latency_ms": row.total_latency_ms,
+            "additional_investigation_requested": row.additional_investigation_requested,
+            "hypotheses": row.hypotheses,
+            "priorities": row.priorities,
+            "unresolved": row.unresolved,
+            "observations": row.observations,
+            "started_at": row.started_at.isoformat(),
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+            "created_at": row.created_at.isoformat(),
+            "updated_at": row.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _investigation_turn_dict(row: AIInvestigationTurnRow) -> dict[str, Any]:
+        return {
+            "turn_id": row.turn_id,
+            "investigation_id": row.investigation_id,
+            "turn_sequence": row.turn_sequence,
+            "phase": row.phase,
+            "endpoint": row.endpoint,
+            "status": row.status,
+            "request_payload": row.request_payload,
+            "response_payload": row.response_payload,
+            "error_code": row.error_code,
+            "attempt_count": row.attempt_count,
+            "latency_ms": row.latency_ms,
+            "created_at": row.created_at.isoformat(),
+        }
+
+    @staticmethod
+    def _assert_investigation_identity(
+        row: AIInvestigationRunRow,
+        expected: Mapping[str, Any],
+    ) -> None:
+        mismatches = [field for field, value in expected.items() if getattr(row, field) != value]
+        if mismatches:
+            raise StorageConflict(
+                "idempotency key was reused with different investigation fields: "
+                + ", ".join(mismatches)
+            )
+
+    @staticmethod
+    def _assert_investigation_turn_identity(
+        row: AIInvestigationTurnRow,
+        expected: Mapping[str, Any],
+    ) -> None:
+        mismatches = [field for field, value in expected.items() if getattr(row, field) != value]
+        if mismatches:
+            raise StorageConflict(
+                "investigation turn sequence was reused with different fields: "
+                + ", ".join(mismatches)
+            )
+
+    @staticmethod
+    def _assert_idempotent_investigation_update(
+        row: AIInvestigationRunRow,
+        expected: Mapping[str, Any],
+    ) -> None:
+        mismatches = [field for field, value in expected.items() if getattr(row, field) != value]
+        if mismatches:
+            raise StorageConflict(
+                "investigation terminal status is immutable: " + ", ".join(mismatches)
+            )
+
+    @staticmethod
+    def _investigation_json_mapping(
+        value: Mapping[str, Any],
+        *,
+        field: str,
+    ) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise StorageError(f"investigation {field} must be an object")
+        clean = FlowGuardRepository._investigation_json_value(value, field=field)
+        if not isinstance(clean, dict):
+            raise StorageError(f"investigation {field} must be an object")
+        FlowGuardRepository._reject_forbidden_investigation_keys(clean)
+        observations = clean.get("observations")
+        if observations is not None:
+            FlowGuardRepository._validate_projected_investigation_observations(observations)
+        return clean
+
+    @staticmethod
+    def _investigation_json_list(
+        value: Iterable[Any],
+        *,
+        field: str,
+        item_type: type[dict[Any, Any]] | type[str],
+    ) -> list[Any]:
+        if not isinstance(value, (list, tuple)):
+            raise StorageError(f"investigation {field} must be an ordered list")
+        clean = FlowGuardRepository._investigation_json_value(list(value), field=field)
+        if not isinstance(clean, list) or any(not isinstance(item, item_type) for item in clean):
+            expected = "objects" if item_type is dict else "strings"
+            raise StorageError(f"investigation {field} must contain only {expected}")
+        return clean
+
+    @staticmethod
+    def _investigation_json_value(value: Any, *, field: str) -> Any:
+        try:
+            return json.loads(
+                json.dumps(
+                    jsonable(value),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+            )
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise StorageError(f"investigation {field} must be JSON-safe") from exc
+
+    @staticmethod
+    def _reject_forbidden_investigation_keys(value: Any) -> None:
+        if isinstance(value, Mapping):
+            forbidden = INVESTIGATION_AUDIT_FORBIDDEN_KEYS.intersection(value)
+            if forbidden:
+                raise StorageError(
+                    "investigation audit payload contains forbidden raw fields: "
+                    + ", ".join(sorted(forbidden))
+                )
+            for item in value.values():
+                FlowGuardRepository._reject_forbidden_investigation_keys(item)
+        elif isinstance(value, list):
+            for item in value:
+                FlowGuardRepository._reject_forbidden_investigation_keys(item)
+
+    @staticmethod
+    def _validate_projected_investigation_observations(value: Any) -> None:
+        if not isinstance(value, list):
+            raise StorageError("investigation observations must be a list")
+        for observation in value:
+            if not isinstance(observation, Mapping) or set(observation) != {
+                "tool",
+                "params",
+                "reason",
+                "result",
+            }:
+                raise StorageError("investigation observation has an invalid shape")
+            tool = observation["tool"]
+            reason = observation["reason"]
+            if not isinstance(tool, str) or not isinstance(reason, str) or not reason.strip():
+                raise StorageError("investigation observation tool and reason must be text")
+            params = observation["params"]
+            param_keys = {"counterpartyId", "dateFrom", "dateTo", "actionType"}
+            if not isinstance(params, Mapping) or set(params) != param_keys:
+                raise StorageError("investigation observation params are not allowed")
+            counterparty_id = params["counterpartyId"]
+            date_from = params["dateFrom"]
+            date_to = params["dateTo"]
+            action_type = params["actionType"]
+            if counterparty_id is not None and (
+                not isinstance(counterparty_id, str) or not counterparty_id
+            ):
+                raise StorageError("investigation counterpartyId is invalid")
+            for date_value in (date_from, date_to):
+                if date_value is not None:
+                    if not isinstance(date_value, str):
+                        raise StorageError("investigation observation date is invalid")
+                    try:
+                        date.fromisoformat(date_value)
+                    except ValueError as exc:
+                        raise StorageError("investigation observation date is invalid") from exc
+            if action_type is not None and (not isinstance(action_type, str) or not action_type):
+                raise StorageError("investigation actionType is invalid")
+            present_params = {key for key, item in params.items() if item is not None}
+            expected_params = {
+                "get_financial_context": set(),
+                "get_counterparty_evidence": {"counterpartyId"},
+                "query_financial_events": {"dateFrom", "dateTo"},
+            }
+            if present_params != expected_params.get(tool):
+                raise StorageError("investigation observation params do not match its tool")
+            result = observation["result"]
+            if not isinstance(result, Mapping):
+                raise StorageError("investigation observation result must be an object")
+            if tool == "get_counterparty_evidence":
+                valid = (
+                    set(result) == INVESTIGATION_COUNTERPARTY_RESULT_KEYS
+                    and FlowGuardRepository._is_nonempty_text(result["counterparty_id"])
+                    and FlowGuardRepository._is_nonnegative_int(result["payment_history_count"])
+                    and FlowGuardRepository._is_rate(result["on_time_rate"])
+                    and FlowGuardRepository._is_nonnegative_number(result["average_delay_days"])
+                    and FlowGuardRepository._is_nonnegative_number(result["median_delay_days"])
+                    and FlowGuardRepository._is_nonnegative_int(result["maximum_delay_days"])
+                    and FlowGuardRepository._is_nonempty_text(result["recent_trend"])
+                    and FlowGuardRepository._is_rate(result["data_confidence"])
+                )
+            elif tool == "get_financial_context":
+                valid = set(result) == INVESTIGATION_CONTEXT_RESULT_KEYS and all(
+                    FlowGuardRepository._is_nonnegative_int(result[key])
+                    for key in INVESTIGATION_CONTEXT_RESULT_KEYS
+                )
+            elif tool == "query_financial_events":
+                events = result.get("events")
+                valid = (
+                    set(result) == {"events"}
+                    and isinstance(events, list)
+                    and all(
+                        isinstance(event, Mapping)
+                        and set(event) == INVESTIGATION_EVENT_RESULT_KEYS
+                        and FlowGuardRepository._is_nonempty_text(event["event_id"])
+                        and FlowGuardRepository._is_nonempty_text(event["type"])
+                        and FlowGuardRepository._is_iso_date(event["date"])
+                        and FlowGuardRepository._is_nonnegative_int(event["amount"])
+                        and type(event["is_essential"]) is bool
+                        for event in events
+                    )
+                )
+            else:
+                valid = False
+            if not valid:
+                raise StorageError("investigation observation result is not projected")
+
+    @staticmethod
+    def _is_nonempty_text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value)
+
+    @staticmethod
+    def _is_nonnegative_int(value: Any) -> bool:
+        return type(value) is int and value >= 0
+
+    @staticmethod
+    def _is_nonnegative_number(value: Any) -> bool:
+        return type(value) in (int, float) and value >= 0 and math.isfinite(value)
+
+    @staticmethod
+    def _is_rate(value: Any) -> bool:
+        return FlowGuardRepository._is_nonnegative_number(value) and value <= 1
+
+    @staticmethod
+    def _is_iso_date(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _assert_classification_identity(

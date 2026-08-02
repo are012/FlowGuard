@@ -144,3 +144,40 @@ export function listFrom<T>(
   if (value && "data" in value && Array.isArray(value.data)) return value.data;
   return [];
 }
+
+/**
+ * 비동기 분석이 끝날 때까지 대시보드 상태를 확인한다.
+ *
+ * `FLOWGUARD_ANALYSIS_ASYNC=on` 이면 `POST /api/v1/analyses` 가 202 로
+ * 즉시 반환하므로, 완료 여부는 대시보드의 `refresh_status` 로 판단한다.
+ * 동기 모드에서는 이 함수를 호출하지 않는다.
+ */
+export async function waitForAnalysis<T extends { refresh_status?: string }>(
+  options: {
+    intervalMs?: number;
+    timeoutMs?: number;
+    onProgress?: (snapshot: T) => void;
+    signal?: AbortSignal;
+  } = {},
+): Promise<T | undefined> {
+  const { intervalMs = 2000, timeoutMs = 120_000, onProgress, signal } = options;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (signal?.aborted) return undefined;
+    try {
+      const snapshot = await apiRequest<T>("/api/v1/dashboard", { signal });
+      onProgress?.(snapshot);
+      const status = snapshot.refresh_status;
+      // 최신 리포트가 아직 없으면 refresh_status 가 비어 있을 수 있다.
+      if (status && status !== "QUEUED" && status !== "RUNNING") {
+        return snapshot;
+      }
+    } catch (error) {
+      // 첫 분석 전에는 리포트가 없어 404 가 난다. 완료를 기다리는 중이므로 계속한다.
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return undefined;
+}

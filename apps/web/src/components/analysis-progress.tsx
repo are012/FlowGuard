@@ -69,7 +69,15 @@ function formatElapsed(seconds: number) {
   return `${Math.floor(seconds / 60)}분 ${String(seconds % 60).padStart(2, "0")}초`;
 }
 
-export function AnalysisProgress() {
+export function AnalysisProgress({
+  executionStage,
+}: {
+  /**
+   * 서버가 보고한 실제 실행 단계. 비동기 모드에서 폴링으로 받는다.
+   * 주어지면 경과 시간 추정 대신 이 값을 표시한다.
+   */
+  executionStage?: string;
+} = {}) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -80,9 +88,15 @@ export function AnalysisProgress() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const currentIndex = activeStageIndex(elapsed);
+  const reportedIndex = executionStage
+    ? ANALYSIS_STAGES.findIndex((stage) => stage.key === executionStage)
+    : -1;
+  const isReported = reportedIndex >= 0;
+  const currentIndex = isReported ? reportedIndex : activeStageIndex(elapsed);
   const isSlow = elapsed >= SLOW_ANALYSIS_SECONDS;
-  const progress = Math.min(95, (elapsed / TOTAL_ESTIMATED_SECONDS) * 100);
+  const progress = isReported
+    ? Math.min(95, ((currentIndex + 1) / ANALYSIS_STAGES.length) * 100)
+    : Math.min(95, (elapsed / TOTAL_ESTIMATED_SECONDS) * 100);
 
   return (
     <section className="analysis-progress card" data-testid="analysis-progress">
@@ -151,8 +165,9 @@ export function AnalysisProgress() {
       )}
 
       <p className="analysis-progress-note">
-        단계 표시는 실제 분석 파이프라인의 순서를 경과 시간으로 추정한 것입니다.
-        서버가 분석을 마치면 확정된 결과로 전환됩니다.
+        {isReported
+          ? "서버가 보고한 실제 진행 단계입니다. 분석이 끝나면 결과로 전환됩니다."
+          : "단계 표시는 실제 분석 파이프라인의 순서를 경과 시간으로 추정한 것입니다. 서버가 분석을 마치면 확정된 결과로 전환됩니다."}
       </p>
     </section>
   );

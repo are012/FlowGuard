@@ -2,19 +2,21 @@
 
 This repository implements the contest MVP described in `SPECIFICATION.md`. The
 financial calculations and recommendation candidates are deterministic. The
-backend investigator selects evidence, builds predefined actions, and validates
-them without inventing balances, gaps, probabilities, or policy results. A
-separate AI service may group privacy-minimized transaction labels, rank validated
-candidates, and explain them to the user.
+backend investigator validates and executes evidence lookups, builds predefined
+actions, and validates them without inventing balances, gaps, probabilities, or
+policy results. A separate AI service may group privacy-minimized transaction
+labels, request bounded evidence lookups, organize investigation hypotheses,
+rank validated candidates, and explain them to the user.
 
 ## Local topology
 
 - `apps/api`: FastAPI, the deterministic financial core, the investigator, REST
   API, MCP tools, and persistence.
 - `apps/ai-service/main.py`: the deployment entrypoint for an independently
-  started FastAPI process that calls OpenAI for label grouping, candidate
-  ranking, and user-facing explanations. Its implementation comes from the same
-  `apps/api` Python distribution; see `apps/ai-service/README.md`.
+  started FastAPI process that calls OpenAI for label grouping, bounded
+  investigation planning, candidate ranking, and user-facing explanations. Its
+  implementation comes from the same `apps/api` Python distribution; see
+  `apps/ai-service/README.md`.
 - `apps/web`: Next.js user interface.
 - The investigator invokes the MCP-compatible `CoreToolService` in process. A
   FastMCP entrypoint exists, but no separate MCP process or transport is used in
@@ -23,8 +25,8 @@ candidates, and explain them to the user.
   `DATABASE_URL` accepts a PostgreSQL SQLAlchemy URL, but a shared PostgreSQL
   deployment and PostgreSQL integration tests remain part of the expansion profile.
 - Analysis runs synchronously in the MVP while preserving separate financial
-  analysis and AI interpretation states. A durable Redis worker is an
-  infrastructure extension, not a hidden in-process retry.
+  analysis, AI investigation audit, and AI interpretation states. A durable
+  Redis worker is an infrastructure extension, not a hidden in-process retry.
 - No Redis queue, scheduler, Dockerfile, or Compose stack is part of the current
   contest MVP.
 - Authentication and multi-tenant authorization are not implemented in this
@@ -35,19 +37,22 @@ No endpoint performs a real transfer, changes a real card payment date, or appli
 for a financial product. Approving a recommendation creates and analyzes a
 virtual snapshot only.
 
-## Separate AI classification and interpretation service
+## Separate AI classification, investigation, and interpretation service
 
-The backend always owns snapshot creation, financial calculations, evidence and
-MCP tool selection, candidate generation, simulation, and policy validation. It
-never imports an OpenAI client or reads `OPENAI_API_KEY`. The isolated AI service
-receives either a privacy-minimized label projection or validated `facts`,
-`evidence`, and `actionCandidates`; it has no database or MCP access and cannot
-create a new financial action.
+The backend always owns snapshot creation, financial calculations, the allowed
+tool catalog, tool validation and execution, candidate generation, simulation,
+and policy validation. It never imports an OpenAI client or reads
+`OPENAI_API_KEY`. The isolated AI service receives a privacy-minimized label
+projection, a bounded investigation contract, or validated `facts`, `evidence`,
+and `actionCandidates`. It has no database or MCP access, cannot execute a tool,
+and cannot create a new financial action.
 
-The `/classify/labels` endpoint uses contract `1.2` and `/interpret` keeps contract
-`1.1`. Requests and responses carry endpoint-specific correlation and idempotency
-identifiers. Unknown labels or actions, duplicate coverage, malformed responses,
-numeric claims, and mismatched identifiers are rejected.
+The `/classify/labels` endpoint uses contract `1.2`, `/investigate/plan` and
+`/investigate/conclude` use the separate `1.3` contract, and `/interpret` keeps
+contract `1.1`. Requests and responses carry endpoint-specific correlation and
+idempotency identifiers. Unknown labels, tools or actions, duplicate coverage or
+investigations, malformed responses, numeric claims, and mismatched identifiers
+are rejected.
 
 Copy the environment examples into separate files:
 
@@ -73,6 +78,50 @@ occurrence count. Amounts, dates, accounts, balances, and transaction IDs remain
 in the backend. A failed or rejected response falls back to
 `deterministic_grouping()` and does not block the CSV import.
 
+AI investigation is controlled independently:
+
+```bash
+FLOWGUARD_AI_INVESTIGATION=off     # default; exact deterministic investigation
+FLOWGUARD_AI_INVESTIGATION=shadow  # audit AI turns; do not change the result
+FLOWGUARD_AI_INVESTIGATION=on      # apply only a fully validated, persisted result
+```
+
+The AI may request only `get_financial_context`,
+`get_counterparty_evidence`, and `query_financial_events`. The only declared
+`params` keys are `counterpartyId`, `dateFrom`, `dateTo`, and `actionType`.
+Current valid non-null shapes are no params for financial context, only
+`counterpartyId` for counterparty evidence, and the complete in-scope date pair
+for event queries; `actionType` is not accepted by any of the current three
+lookups. The backend executes every request through the investigator's existing
+`call()` wrapper and sends only the tool-specific observation projection back to
+the AI service.
+
+Investigation has at most two lookup phases, six tool calls, and three AI turns.
+Each AI request is bounded by the remaining 5-second phase allowance and the
+whole loop has an 8-second budget. Durable asynchronous analysis and polling are
+not implemented. The conclusion has no field for a new amount, risk date, or
+risk grade. Dates in investigation `params` can only select a backend-supplied
+event window; free-text `reason`, hypothesis `summary`, and `unresolved` values
+reuse `ai_numeric_policy`.
+
+In `shadow`, deterministic analysis finishes normally and the AI result is audit
+only. In `on`, only a fully validated result whose audit was persisted can supply
+investigation hypotheses. A failed or rejected first turn uses the unchanged
+deterministic path. Failure after an observation produces `PARTIAL`: projected
+observations remain available for audit and replay, while the deterministic path
+independently recollects evidence for the final decision.
+
+`ai_investigation_runs` stores the immutable terminal summary and projected
+observations; `ai_investigation_turns` stores the ordered plan/conclusion turns.
+Successful stored runs can be replayed without another AI call, and the replayed
+financial output must match the original numeric result. `off` and virtual
+analyses create neither table's rows.
+
+The dated live-shadow sample, raw outcomes, and latency split are recorded in
+[`docs/plans/track-b-shadow-results.md`](docs/plans/track-b-shadow-results.md).
+That measurement does not meet the `on` promotion gate, so `off` remains the
+default.
+
 The logical import ID is stable for the same user, mode, label set, schema,
 contract, prompt, and locale.
 A successful classification is reused. A later upload after `FAILED` or `REJECTED`
@@ -81,12 +130,14 @@ one attempt keep the same request and idempotency identifiers. User-split groups
 stay split on later uploads with the same labels. Classified imports compare the
 data revision at commit time and reconcile again after a concurrent split.
 
-The backend uses a 3-second connection timeout, 10-second response timeout, and
-15-second total budget. It retries at most once, and only for connection failures,
-temporary timeouts, `429`, `502`, `503`, and `504`. Retries reuse the same request
-and idempotency identifiers. If the service is unavailable or returns an invalid
-response, the deterministic financial result remains successful and FlowGuard
-returns a rule-based explanation.
+Label classification and interpretation use a 3-second connection timeout,
+10-second response timeout, and 15-second total budget. Investigation is capped
+by its stricter 5-second phase and 8-second loop budgets above. The backend
+retries at most once, and only for connection failures, temporary timeouts,
+`429`, `502`, `503`, and `504`. Retries reuse the same request and idempotency
+identifiers. If the service is unavailable or returns an invalid response, the
+deterministic financial result remains successful and FlowGuard uses the
+endpoint-specific deterministic fallback.
 
 Financial analysis status and AI interpretation status are independent. A valid
 combination is `analysis_status=SUCCEEDED` with
@@ -99,6 +150,13 @@ in-flight and successful-response idempotency cache is process-local. A
 multi-worker deployment must add a shared idempotency store before scaling the AI
 service; otherwise a timeout retry routed to another worker could execute the
 same logical OpenAI request twice.
+
+The synchronous analysis API also has a separate process-local N1 guard.
+Concurrent requests with the same user, current data revision, trigger, and
+normalized `as_of` share one owner execution and the exact same response or
+error. The entry is removed after completion, so sequential reruns are allowed;
+virtual analyses are not coalesced. Multiple API workers require a shared lease
+or durable queue to extend this guarantee across processes.
 
 Durable recovery of an interpretation left `RUNNING` by a terminated synchronous
 API process also requires a shared lease/worker queue and is outside the contest
@@ -125,6 +183,7 @@ decisions explicit and versioned:
 | Persistence | Alembic-managed SQLite is tested; a PostgreSQL URL/driver path exists but production PostgreSQL remains expansion work; no Docker resources are created |
 | AI interpretation retry | One retry only for documented transient transport and HTTP failures, within a 15-second total budget |
 | AI label classification | Off by default; contract 1.2, privacy-minimized labels, strict validation, deterministic fallback |
+| AI investigation | Off by default; contract 1.3, two phases, six lookup calls, 8-second total budget, independent deterministic fallback |
 | Latest report promotion | Only a result matching the latest data revision can become the latest report |
 
 The exact constants and version identifiers live in
@@ -178,9 +237,10 @@ make migration-check
 
 The API emits JSON application events through Python logging. Every HTTP response
 includes `X-Request-ID`; a valid incoming `X-Request-ID` is reused so request,
-analysis, AI interpretation, and failure events can be correlated. Logs contain
-identifiers, status, timing, attempts, and stable error codes only. Raw CSV,
-financial payloads, balances, credentials, and AI response text are not logged.
+analysis, AI investigation, AI interpretation, and failure events can be
+correlated. Logs contain identifiers, status, timing, attempts, and stable error
+codes only. Raw CSV, financial payloads, balances, credentials, and AI response
+text are not logged.
 Set `FLOWGUARD_LOG_LEVEL` to control verbosity.
 
 The synchronous MVP applies configurable, per-demo-user sliding-window limits to

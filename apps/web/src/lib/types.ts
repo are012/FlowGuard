@@ -166,13 +166,21 @@ export interface AgentTraceStep {
   title: string;
   summary: string;
   status: string;
+  source?: "AI" | "DETERMINISTIC";
+  phase?: number | null;
+  reason?: string | null;
   tool_name?: string | null;
   candidate_id?: string | null;
   evidence_ids?: string[];
 }
 
+export type AgentDecisionMode =
+  | "DETERMINISTIC"
+  | "AI_INVESTIGATED"
+  | "AI_PARTIAL";
+
 export interface AgentDecisionTrace {
-  mode: string;
+  mode: AgentDecisionMode;
   model?: string | null;
   status: string;
   fallback_reason?: string | null;

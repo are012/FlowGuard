@@ -63,7 +63,7 @@
 | Web | Next.js 프로세스 | 독립 Web 컨테이너 |
 | API와 분석 | FastAPI 요청 안에서 `AnalysisOrchestrator` 동기 실행 | API와 durable worker 분리 |
 | 코어/MCP 도구 | MCP 계약과 같은 도구 구현을 API 프로세스에서 직접 호출; FastMCP 진입점 제공 | 별도 MCP 프로세스와 transport 연결 |
-| AI 분류·해석 | 같은 Python distribution의 별도 FastAPI 프로세스, 단일 worker | 공유 멱등 저장소를 사용하는 독립 서비스 |
+| AI 분류·조사·해석 | 같은 Python distribution의 별도 FastAPI 프로세스, 단일 worker | 공유 멱등 저장소를 사용하는 독립 서비스 |
 | 저장소 | Alembic 버전 관리 SQLite·자동 마이그레이션 테스트; PostgreSQL URL과 driver 경로 제공 | 검증된 PostgreSQL 배포·통합 테스트 |
 | 큐와 스케줄러 | 사용하지 않음 | Redis queue, lease, 정기 실행 |
 | 컨테이너 | Dockerfile과 Compose를 MVP 완료 조건에 포함하지 않음 | 운영 배포 방식 확정 후 구성 |
@@ -987,9 +987,15 @@ Liquidity Investigator Agent는 백엔드 분석 책임을 담당하는 구성�
 - 정책 검증 결과 확인
 - 최종 추천 근거 구조화
 
-별도 AI 서비스가 존재하더라도, 다음 책임은 백엔드 조사기에 남는다.
+`FLOWGUARD_AI_INVESTIGATION=on`이면 별도 AI 서비스가 허용된 조회 중 무엇을 확인할지
+요청하고 조사 가설과 후보 유형 우선순위를 정리할 수 있다. 그래도 다음 책임은 백엔드
+조사기에 남는다.
 
-- MCP 계약과 동일한 코어 도구 선택 및 호출
+현재 MVP는 조사 결론의 후보 유형 우선순위를 감사 기록에 저장하되, 결정론적 후보
+생성·평가·최종 선택 순서를 재배열하거나 필터링하는 데 사용하지 않는다.
+
+- AI 요청의 도구·매개변수·범위·중복 검증
+- MCP 계약과 동일한 코어 도구의 실제 호출과 실행 기록
 - 후보 대응안 생성
 - 후보 대응안 평가
 - 정책 검증 통과 여부 판단
@@ -1018,6 +1024,10 @@ Liquidity Investigator Agent는 백엔드 분석 책임을 담당하는 구성�
 
 에이전트는 별도 AI 서비스 없이도 결정론적 후보 생성을 완료할 수 있어야 한다.
 
+AI 조사 미설정·실패·거부 시에는 보존된 `deterministic_hypotheses()`와
+`RiskEvidenceBuilder` 순서를 사용한다. 일부 관찰 뒤 실패해도 그 관찰은 감사·재생에만
+남기고, 최종 판단에 쓰는 근거는 결정론 경로가 독립적으로 다시 수집한다.
+
 ## 14.3 실행 한도
 
 초기 기본값:
@@ -1029,7 +1039,20 @@ Liquidity Investigator Agent는 백엔드 분석 책임을 담당하는 구성�
 사용자 노출 대응안 수: 우선 추천 1개 + 대안 최대 2개
 ```
 
-운영 기본값 확정 여부는 `TBD`다.
+위 MCP 호출 수 10회는 기존 결정론 조사와 대응안 평가 예산이다. 선택적 AI 조사에는
+별도로 다음 고정 한도를 적용한다. 현재 분석은 동기 실행하며 durable worker와 상태
+폴링(C1·C2)은 포함하지 않는다.
+
+```text
+MAX_PHASES: 2
+MAX_TOOL_CALLS: 6
+PHASE_TIMEOUT: 5초
+TOTAL_BUDGET: 8초
+AI 턴 수: 최대 3 (`plan` 1회, `conclude` 최대 2회)
+```
+
+기존 일반 실행 한도의 운영 기본값 확정 여부는 `TBD`다. 위 AI 조사 한도는 동기 MVP의
+고정 안전장치다.
 
 ---
 
@@ -1067,6 +1090,12 @@ Liquidity Investigator Agent는 백엔드 분석 책임을 담당하는 구성�
 저장된 실행 산출물만 포함한다. 모델의 숨은 사고과정이나 원문 추론 토큰은 저장하거나
 사용자에게 노출하지 않는다. AI 해석 요청 및 응답은 별도 `ai_interpretation_runs`
 모델에 저장하며, 조사기 상태와 분리한다.
+
+조사 모드는 `DETERMINISTIC`, `AI_INVESTIGATED`, `AI_PARTIAL` 중 하나다. AI가 요청한
+조회 단계에는 `source="AI"`, `phase`, 검증된 `reason`을 붙인다. `AI_PARTIAL`의 성공한
+관찰은 `AUDIT_ONLY`로 표시하고 최종 판단에 적용하지 않는다. 화면은 AI 출처 배지를
+항상 노출하고 조회 이유를 기본 접힌 상세로 제공한다. 확인하지 못한 항목은
+`unresolved_questions`로 공개하되 숨은 모델 추론은 공개하지 않는다.
 
 ---
 
@@ -1381,9 +1410,9 @@ confirm_receivable
 안에서 호출한다. `flowguard.mcp_server`는 같은 일곱 도구의 FastMCP 진입점을
 제공하지만, 별도 MCP 프로세스와 transport 연결은 운영 확장 범위다.
 
-## 20.1 AI 해석 서버 계약(백엔드 ↔ AI Service)
+## 20.1 AI 서비스 계약(백엔드 ↔ AI Service)
 
-백엔드와 AI 서비스는 다음 JSON 계약을 사용한다. 계약은 `schemaVersion: "1.1"`을 기준으로 버전 관리한다.
+`POST /interpret`는 다음 JSON 계약을 사용한다. 계약은 `schemaVersion: "1.1"`을 기준으로 버전 관리한다.
 이 계약은 **구조화 해석 전용**이며, 금융 계산·MCP 호출·후보 생성 책임을 AI 서비스에 넘기지 않는다.
 
 ### 20.1.1 백엔드 → AI 요청
@@ -1591,6 +1620,61 @@ OTHER_OUTFLOW
 동일 업로드에서 재사용한다. `FAILED` 또는 `REJECTED` 뒤 사용자가 다시 업로드하면 이전
 `classification_id`에서 파생한 `:retry-<classification_id>` 접미사의 새 시도 키를
 사용해 일시 장애가 영구 고착되지 않게 한다.
+
+### 20.1.6 위험 조사 계약 (`POST /investigate/plan`, `POST /investigate/conclude`)
+
+위험 조사는 분류·해석과 분리된 `schemaVersion: "1.3"`,
+`contractVersion: "1.3"`, `promptVersion: "invest-1"`을 사용한다. `/interpret`는
+`1.1`, `/classify/labels`는 `1.2`를 그대로 유지한다. 요청과 응답은 다음 식별자 9종을
+동일하게 에코해야 한다.
+
+```text
+schemaVersion       contractVersion      promptVersion
+requestId           idempotencyKey       analysisId
+snapshotId          snapshotRevision     locale
+```
+
+`/investigate/plan` 요청은 백엔드가 계산한 `baseline`과 허용된 `targets`를 전달하고,
+응답은 1~3개의 `investigations`를 반환한다. 백엔드는 요청을 검증하고 도구를 실행한 뒤
+화이트리스트로 투영한 `observations`만 `/investigate/conclude`에 전달한다. 첫 결론은
+1~2개의 `additionalInvestigations` 또는 최종 `conclusion` 중 정확히 하나를 반환해야
+한다. 추가 조회가 있었다면 마지막 결론 요청은 추가 조사를 금지하며 반드시
+`conclusion`을 반환해야 한다.
+
+AI가 요청할 수 있는 도구는 다음 조회 3종뿐이다.
+
+```text
+get_financial_context
+get_counterparty_evidence
+query_financial_events
+```
+
+AI는 이 이름과 매개변수를 응답할 뿐 도구를 직접 호출하지 않는다. 백엔드가 기존
+조사기 `call()` 래퍼로 실행·기록한다. `params`에 선언할 수 있는 키는
+`counterpartyId`, `dateFrom`, `dateTo`, `actionType`뿐이며 추가 키는 거부한다. 현재
+도구별 유효한 비-null 조합은 다음과 같다.
+
+| 도구 | 현재 허용 매개변수 |
+|---|---|
+| `get_financial_context` | 없음 |
+| `get_counterparty_evidence` | 요청 `targets.counterpartyIds` 안의 `counterpartyId` |
+| `query_financial_events` | `targets.eventWindow` 안의 `dateFrom`과 `dateTo` |
+
+`actionType`은 닫힌 행동 카탈로그와 요청 범위를 검증하기 위해 계약에 선언되어 있지만,
+현재 조회 3종의 유효 매개변수 조합에는 포함되지 않는다. 날짜 쌍은 함께 있어야 하고
+순서가 맞아야 하며, 같은 `(tool, params)` 요청은 한 조사에서 반복할 수 없다.
+
+조사 응답에는 새 금액·새 위험 날짜·위험등급을 생성하는 필드가 없다. `dateFrom`과
+`dateTo`는 백엔드가 제공한 범위 안에서 조회 구간을 고르는 값일 뿐 새로운 금융
+사실이 아니다. `reason`, 가설 `summary`, `unresolved`에는 기존
+`ai_numeric_policy`를 적용해 숫자·금액·날짜·일수·비율 표현을 거부한다. 결론의 가설은
+최대 3개이고 `candidatePriorities`는 요청한 행동 유형의 부분집합이어야 한다.
+
+AI 서비스는 DB나 MCP에 접근하지 않는다. 조회 결과의 원문 전체도 받지 않으며 도구별
+명시적 관찰 투영만 받는다. 정의되지 않은 도구와 투영은 기본 거부한다. 조사는 조회
+단계 최대 2개, 도구 호출 최대 6회, AI 요청당 최대 5초, 전체 8초로 제한한다. 첫 턴
+실패·거부는 기존 결정론 조사로 돌아간다. 일부 관찰 뒤 실패·거부는 `PARTIAL`로
+기록하되 관찰을 최종 판단에 섞지 않고 결정론 경로가 근거를 독립적으로 다시 수집한다.
 
 ## 20.2 공통 규칙
 
@@ -1832,6 +1916,13 @@ POST /api/v1/analyses
 GET  /api/v1/analyses/{analysis_id}
 GET  /api/v1/analyses/{analysis_id}/events
 ```
+
+동일 API 프로세스 안에서 `user_id`, 현재 데이터 revision, `trigger_type`, 정규화한
+`as_of`가 모두 같은 동시 `POST /api/v1/analyses` 요청은 하나의 실행으로 합치고 같은
+응답 또는 오류를 공유한다. 실행 종료 뒤 같은 요청을 순차 재실행하는 것은 허용하며,
+가상 분석에는 이 병합을 적용하지 않는다. 이 방어는 프로세스 로컬이므로 다중 worker,
+프로세스 장애와 재시작을 가로지르는 중복 실행 방지는 공유 lease 또는 durable queue가
+필요하다.
 
 ## 21.3 사용자 화면
 
@@ -2096,6 +2187,34 @@ completed_at
 포괄하는 그룹 수가 반드시 있어야 한다. `on`의 `applied=true` 완료와 후보·거래 저장은
 같은 데이터베이스 트랜잭션에서 커밋한다.
 
+## 22.3 AI 위험 조사 실행 저장 모델
+
+조사 요약과 각 AI 턴을 분리해 저장한다.
+
+```text
+ai_investigation_runs
+ai_investigation_turns
+```
+
+`ai_investigation_runs`에는 분석·사용자·스냅숏과 revision, 요청·멱등 키, 스키마·계약·
+프롬프트 버전, `SHADOW|ON` 모드, 상태, 모델명, 도구 호출 수, 전체 지연, 추가 조사 여부,
+가설·후보 우선순위·미해결 항목과 투영된 관찰을 저장한다. 상태는 `IN_PROGRESS`에서
+`SUCCEEDED|PARTIAL|REJECTED|FAILED` 중 하나로만 완료하며 완료 뒤에는 변경하지 않는다.
+`idempotency_key`에는 unique constraint를 둔다.
+
+`ai_investigation_turns`에는 실행 ID, 1~3의 `turn_sequence`, 1~2의 `phase`, endpoint,
+상태, 요청·검증 응답, 오류, 시도 횟수와 지연을 저장한다. `(investigation_id,
+turn_sequence)`는 유일하고 턴은 순서대로만 추가한다. 두 조사 감사 테이블에는 원시
+도구 결과를 중복 저장하지 않고 AI에 전달한 화이트리스트 관찰만 저장한다. 백엔드의
+실제 도구 입출력은 기존 `tool_executions`에 별도로 기록한다. 같은 실행 기록과
+스냅숏으로 재생할 때 금융 코어·후보 평가·정책 검증의 최종 수치는 원 실행과 같아야
+한다.
+
+`off`와 가상 분석은 조사 실행·턴 행을 만들지 않는다. `shadow`는 기록을 만들지만
+결정론 결과를 바꾸지 않는다. `on`의 완전한 성공만 조사 가설을 적용한다. `PARTIAL`의
+관찰은 감사 전용이며 결정론 경로가 독립적으로 수집한 근거와 최종 판단 입력에서 섞지
+않는다.
+
 ---
 
 # 23. 실패 처리
@@ -2107,6 +2226,8 @@ completed_at
 - 정책 검증이 실패하면 해당 대응안을 사용자에게 최종 추천으로 노출하지 않는다.
 - 분석 실패를 `STABLE`로 변환하지 않는다.
 - AI 해석 실패만으로 금융 분석 전체를 `FAILED`로 처리하지 않는다.
+- AI 조사의 실패·거부·부분 완료만으로 금융 분석 전체를 `FAILED`로 처리하지 않고,
+  기존 결정론 조사로 완료한다.
 - 오래된 스냅숏의 추천안을 승인하려 하면 최신 데이터로 재검증한다.
 - 오래된 `snapshotRevision`의 분석 결과나 AI 응답은 저장할 수 있지만 `latest report`로 승격하지 않는다.
 - 이전 성공 리포트와 현재 실패 상태를 구분해 저장한다.
@@ -2252,7 +2373,8 @@ ANALYSIS_FAILED
 - 카드 개별 거래와 카드 청구액은 중복 반영되지 않는다.
 - 할부 원거래와 월별 할부금은 중복 반영되지 않는다.
 - 현재 카드 청구액에 포함된 이번 달 할부금을 다시 추가하지 않는다.
-- 동일한 스냅숏, 설정, 시드에는 동일한 결과가 나온다.
+- 동일한 스냅숏, 설정, 시드에는 금융 코어와 후보 평가·정책 검증의 최종 수치가
+  동일하다. AI 조사 순서와 가설 문구는 달라질 수 있다.
 - 금융 코어 실패 시 가짜 위험지표를 반환하지 않는다.
 - 정책 검증 실패 대응안은 최종 추천이 될 수 없다.
 - 사용자 승인 없이 가상 적용 이상의 행동을 수행하지 않는다.
@@ -2260,6 +2382,10 @@ ANALYSIS_FAILED
 - AI 분류가 실패하거나 거부되면 완전일치 그룹핑 결과와 금융 데이터 revision은
   정상적으로 유지된다.
 - AI 라벨 분류 요청에는 금액·날짜·계좌·거래 ID가 포함되지 않는다.
+- AI 조사 응답에는 새 금액·위험 날짜·위험등급 필드가 없고 자유 텍스트 숫자 정책을
+  통과해야 한다.
+- AI 조사 서비스는 도구·DB·MCP에 직접 접근하지 않고, 도구 실행은 백엔드가 기록한다.
+- AI 조사 실패·거부·부분 완료 시 최종 수치는 독립 결정론 폴백과 동일해야 한다.
 
 ---
 
@@ -2276,6 +2402,8 @@ MVP 핵심 구현은 다음 조건을 충족해야 한다.
 - Safe-to-Spend를 계산할 수 있다.
 - 예정 수입 지연 시나리오를 반영할 수 있다.
 - 에이전트가 MCP 계약과 호환되는 코어 도구를 통해 근거를 조회할 수 있다.
+- 선택적 AI 조사가 허용된 조회 3종만 요청하고 백엔드가 이를 검증·실행할 수 있다.
+- AI 조사 실행과 최대 세 턴을 감사 저장하고 같은 기록으로 최종 수치를 재생할 수 있다.
 - 후보 대응안을 정의된 행동 스키마로 생성할 수 있다.
 - 대응안을 가상 적용하고 전후 결과를 비교할 수 있다.
 - 반동위험을 탐지할 수 있다.

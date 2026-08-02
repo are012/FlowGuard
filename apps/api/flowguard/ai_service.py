@@ -1,4 +1,4 @@
-"""Isolated AI interpretation service entrypoint.
+"""Isolated AI interpretation and investigation service entrypoint.
 
 Run this module as a separate process. It intentionally imports neither the
 FlowGuard repository nor MCP tools; the backend sends only validated facts,
@@ -32,6 +32,12 @@ from flowguard.ai_contract import (
     AIIdentifier,
     AIToBackendResponse,
     BackendToAIRequest,
+    Investigation,
+    InvestigationConcludeRequest,
+    InvestigationConcludeResponse,
+    InvestigationConclusion,
+    InvestigationPlanRequest,
+    InvestigationPlanResponse,
     LabelClassificationGroup,
     LabelClassificationRequest,
     LabelClassificationResponse,
@@ -57,6 +63,38 @@ every supplied label ID exactly once, either in a group or in ungrouped, and
 never invent an ID. Return only the requested structured fields. Do not put any
 number, amount, date, account information, transaction ID, or probability in
 normalizedName or reason. Do not expose hidden reasoning.
+""".strip()
+
+INVESTIGATION_PLAN_INSTRUCTIONS = """
+You are FlowGuard's investigation planning service. Request between one and
+three independent lookups using only get_financial_context,
+get_counterparty_evidence, or query_financial_events. You may only use the
+counterparty IDs, event window, and action types supplied by the backend.
+Use empty params for get_financial_context, only counterpartyId for
+get_counterparty_evidence, and only dateFrom plus dateTo for
+query_financial_events. Do not set actionType for these lookup tools.
+Do not call tools yourself; return structured lookup requests for the backend
+to validate and execute. Never put an amount, date, duration, probability, or
+risk grade in free-text reason fields. Do not expose hidden reasoning.
+""".strip()
+
+INVESTIGATION_CONCLUDE_INSTRUCTIONS = """
+You are FlowGuard's investigation conclusion service. Use only the supplied
+baseline, targets, and projected observations. Return either one or two
+additional lookup requests or a conclusion, never both. Additional lookups
+may use only get_financial_context, get_counterparty_evidence, or
+query_financial_events, and the backend alone executes them. Conclusion
+hypotheses and candidate priorities are qualitative ordering hints; never
+invent or change an amount, date, financial calculation, probability, or risk
+grade. Never put a number, amount, date, duration, probability, or risk grade
+in reason, summary, or unresolved free text. Use the same exact params shapes
+as the planning service and do not set actionType on lookup requests. Do not
+expose hidden reasoning.
+""".strip()
+
+FINAL_CONCLUSION_INSTRUCTION = """
+This is the final conclusion call. additionalInvestigations is not allowed;
+you must return conclusion.
 """.strip()
 
 
@@ -96,8 +134,39 @@ class LabelClassificationContent(BaseModel):
         return self
 
 
+class InvestigationPlanContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    investigations: list[Investigation] = Field(min_length=1, max_length=3)
+
+
+class InvestigationConcludeContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    additionalInvestigations: list[Investigation] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2,
+    )
+    conclusion: InvestigationConclusion | None = None
+
+    @model_validator(mode="after")
+    def has_exactly_one_outcome(self) -> InvestigationConcludeContent:
+        if (self.additionalInvestigations is None) == (self.conclusion is None):
+            raise ValueError("exactly one investigation outcome is required")
+        return self
+
+
 @dataclass(slots=True)
 class _ClassificationInFlight:
+    fingerprint: str
+    completion: Event
+    failure_status_code: int | None = None
+    failure_detail: Any = None
+
+
+@dataclass(slots=True)
+class _InvestigationInFlight:
     fingerprint: str
     completion: Event
     failure_status_code: int | None = None
@@ -108,10 +177,10 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
     configure_logging()
     app = FastAPI(
         title="FlowGuard AI Interpretation Service",
-        version="1.2.0",
+        version="1.3.0",
         description=(
-            "Groups privacy-minimized labels, ranks validated FlowGuard actions, "
-            "and generates user-facing explanations."
+            "Plans bounded evidence lookups, groups privacy-minimized labels, ranks "
+            "validated FlowGuard actions, and generates user-facing explanations."
         ),
     )
     configured_model = model or os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
@@ -126,6 +195,11 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
     classification_cache_lock = Lock()
     classification_response_cache: dict[str, tuple[str, LabelClassificationResponse]] = {}
     classification_in_flight: dict[str, _ClassificationInFlight] = {}
+    investigation_cache_lock = Lock()
+    investigation_plan_cache: dict[str, tuple[str, InvestigationPlanResponse]] = {}
+    investigation_plan_in_flight: dict[str, _InvestigationInFlight] = {}
+    investigation_conclude_cache: dict[str, tuple[str, InvestigationConcludeResponse]] = {}
+    investigation_conclude_in_flight: dict[str, _InvestigationInFlight] = {}
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -400,6 +474,300 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
         )
         return result
 
+    @app.post("/investigate/plan", response_model=InvestigationPlanResponse)
+    def investigate_plan(request: InvestigationPlanRequest) -> InvestigationPlanResponse:
+        if client is None:
+            raise HTTPException(status_code=503, detail="OpenAI is not configured")
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                request.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        with investigation_cache_lock:
+            cached = investigation_plan_cache.get(request.idempotencyKey)
+            if cached is not None:
+                if cached[0] != fingerprint:
+                    raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "ai_service_investigation_plan_cache_hit",
+                    analysis_id=request.analysisId,
+                    ai_request_id=request.requestId,
+                )
+                return cached[1]
+            pending = investigation_plan_in_flight.get(request.idempotencyKey)
+            if pending is None:
+                pending = _InvestigationInFlight(
+                    fingerprint=fingerprint,
+                    completion=Event(),
+                )
+                investigation_plan_in_flight[request.idempotencyKey] = pending
+                owns_request = True
+            else:
+                if pending.fingerprint != fingerprint:
+                    raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+                owns_request = False
+        if not owns_request:
+            if not pending.completion.wait(timeout=15):
+                raise HTTPException(status_code=503, detail="Investigation plan is still running")
+            with investigation_cache_lock:
+                cached = investigation_plan_cache.get(request.idempotencyKey)
+                failure_status_code = pending.failure_status_code
+                failure_detail = pending.failure_detail
+            if cached is not None:
+                return cached[1]
+            if failure_status_code is not None:
+                raise HTTPException(status_code=failure_status_code, detail=failure_detail)
+            raise HTTPException(status_code=503, detail="Investigation plan did not complete")
+
+        try:
+            response = client.responses.parse(
+                model=configured_model,
+                instructions=INVESTIGATION_PLAN_INSTRUCTIONS,
+                input=json.dumps(
+                    {
+                        "locale": request.locale,
+                        "baseline": request.baseline.model_dump(mode="json"),
+                        "targets": request.targets.model_dump(mode="json"),
+                    },
+                    ensure_ascii=False,
+                ),
+                text_format=InvestigationPlanContent,
+                reasoning={"effort": "low", "context": "current_turn"},
+                store=False,
+            )
+            content = response.output_parsed
+            if content is None:
+                raise ValueError("OpenAI response did not contain parsed output")
+            content = InvestigationPlanContent.model_validate(content)
+            result = InvestigationPlanResponse(
+                **request.model_dump(
+                    mode="json",
+                    include={
+                        "schemaVersion",
+                        "contractVersion",
+                        "promptVersion",
+                        "requestId",
+                        "idempotencyKey",
+                        "analysisId",
+                        "snapshotId",
+                        "snapshotRevision",
+                        "locale",
+                    },
+                ),
+                **content.model_dump(mode="json"),
+            )
+        except (ValidationError, ValueError) as exc:
+            with investigation_cache_lock:
+                pending.failure_status_code = 422
+                pending.failure_detail = {"code": "invalid_investigation_response"}
+                investigation_plan_in_flight.pop(request.idempotencyKey, None)
+                pending.completion.set()
+            log_event(
+                logger,
+                logging.WARNING,
+                "ai_service_investigation_plan_rejected",
+                analysis_id=request.analysisId,
+                ai_request_id=request.requestId,
+                exception_type=type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_investigation_response"},
+            ) from exc
+        except Exception as exc:
+            with investigation_cache_lock:
+                pending.failure_status_code = 502
+                pending.failure_detail = "AI investigation plan failed"
+                investigation_plan_in_flight.pop(request.idempotencyKey, None)
+                pending.completion.set()
+            log_event(
+                logger,
+                logging.ERROR,
+                "ai_service_investigation_plan_failed",
+                analysis_id=request.analysisId,
+                ai_request_id=request.requestId,
+                exception_type=type(exc).__name__,
+            )
+            raise HTTPException(status_code=502, detail="AI investigation plan failed") from exc
+
+        with investigation_cache_lock:
+            if len(investigation_plan_cache) >= 512:
+                investigation_plan_cache.pop(next(iter(investigation_plan_cache)))
+            investigation_plan_cache[request.idempotencyKey] = (fingerprint, result)
+            investigation_plan_in_flight.pop(request.idempotencyKey, None)
+            pending.completion.set()
+        log_event(
+            logger,
+            logging.INFO,
+            "ai_service_investigation_plan_finished",
+            analysis_id=request.analysisId,
+            ai_request_id=request.requestId,
+            investigation_count=len(result.investigations),
+        )
+        return result
+
+    @app.post("/investigate/conclude", response_model=InvestigationConcludeResponse)
+    def investigate_conclude(
+        request: InvestigationConcludeRequest,
+    ) -> InvestigationConcludeResponse:
+        if client is None:
+            raise HTTPException(status_code=503, detail="OpenAI is not configured")
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                request.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        with investigation_cache_lock:
+            cached = investigation_conclude_cache.get(request.idempotencyKey)
+            if cached is not None:
+                if cached[0] != fingerprint:
+                    raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "ai_service_investigation_conclude_cache_hit",
+                    analysis_id=request.analysisId,
+                    ai_request_id=request.requestId,
+                )
+                return cached[1]
+            pending = investigation_conclude_in_flight.get(request.idempotencyKey)
+            if pending is None:
+                pending = _InvestigationInFlight(
+                    fingerprint=fingerprint,
+                    completion=Event(),
+                )
+                investigation_conclude_in_flight[request.idempotencyKey] = pending
+                owns_request = True
+            else:
+                if pending.fingerprint != fingerprint:
+                    raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+                owns_request = False
+        if not owns_request:
+            if not pending.completion.wait(timeout=15):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Investigation conclusion is still running",
+                )
+            with investigation_cache_lock:
+                cached = investigation_conclude_cache.get(request.idempotencyKey)
+                failure_status_code = pending.failure_status_code
+                failure_detail = pending.failure_detail
+            if cached is not None:
+                return cached[1]
+            if failure_status_code is not None:
+                raise HTTPException(status_code=failure_status_code, detail=failure_detail)
+            raise HTTPException(status_code=503, detail="Investigation conclusion did not complete")
+
+        instructions = INVESTIGATION_CONCLUDE_INSTRUCTIONS
+        if not request.allowAdditionalInvestigations:
+            instructions = f"{instructions}\n\n{FINAL_CONCLUSION_INSTRUCTION}"
+        try:
+            response = client.responses.parse(
+                model=configured_model,
+                instructions=instructions,
+                input=json.dumps(
+                    {
+                        "locale": request.locale,
+                        "baseline": request.baseline.model_dump(mode="json"),
+                        "targets": request.targets.model_dump(mode="json"),
+                        "observations": [
+                            item.model_dump(mode="json") for item in request.observations
+                        ],
+                        "allowAdditionalInvestigations": (request.allowAdditionalInvestigations),
+                    },
+                    ensure_ascii=False,
+                ),
+                text_format=InvestigationConcludeContent,
+                reasoning={"effort": "low", "context": "current_turn"},
+                store=False,
+            )
+            content = response.output_parsed
+            if content is None:
+                raise ValueError("OpenAI response did not contain parsed output")
+            content = InvestigationConcludeContent.model_validate(content)
+            if (
+                not request.allowAdditionalInvestigations
+                and content.additionalInvestigations is not None
+            ):
+                raise ValueError("additional investigations are not allowed on the final call")
+            result = InvestigationConcludeResponse(
+                **request.model_dump(
+                    mode="json",
+                    include={
+                        "schemaVersion",
+                        "contractVersion",
+                        "promptVersion",
+                        "requestId",
+                        "idempotencyKey",
+                        "analysisId",
+                        "snapshotId",
+                        "snapshotRevision",
+                        "locale",
+                    },
+                ),
+                **content.model_dump(mode="json"),
+            )
+        except (ValidationError, ValueError) as exc:
+            with investigation_cache_lock:
+                pending.failure_status_code = 422
+                pending.failure_detail = {"code": "invalid_investigation_response"}
+                investigation_conclude_in_flight.pop(request.idempotencyKey, None)
+                pending.completion.set()
+            log_event(
+                logger,
+                logging.WARNING,
+                "ai_service_investigation_conclude_rejected",
+                analysis_id=request.analysisId,
+                ai_request_id=request.requestId,
+                exception_type=type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_investigation_response"},
+            ) from exc
+        except Exception as exc:
+            with investigation_cache_lock:
+                pending.failure_status_code = 502
+                pending.failure_detail = "AI investigation conclusion failed"
+                investigation_conclude_in_flight.pop(request.idempotencyKey, None)
+                pending.completion.set()
+            log_event(
+                logger,
+                logging.ERROR,
+                "ai_service_investigation_conclude_failed",
+                analysis_id=request.analysisId,
+                ai_request_id=request.requestId,
+                exception_type=type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="AI investigation conclusion failed",
+            ) from exc
+
+        with investigation_cache_lock:
+            if len(investigation_conclude_cache) >= 512:
+                investigation_conclude_cache.pop(next(iter(investigation_conclude_cache)))
+            investigation_conclude_cache[request.idempotencyKey] = (fingerprint, result)
+            investigation_conclude_in_flight.pop(request.idempotencyKey, None)
+            pending.completion.set()
+        log_event(
+            logger,
+            logging.INFO,
+            "ai_service_investigation_conclude_finished",
+            analysis_id=request.analysisId,
+            ai_request_id=request.requestId,
+            requested_additional=result.additionalInvestigations is not None,
+        )
+        return result
+
     return app
 
 
@@ -407,8 +775,13 @@ app = create_app()
 
 
 __all__ = [
+    "FINAL_CONCLUSION_INSTRUCTION",
     "INTERPRETATION_INSTRUCTIONS",
+    "INVESTIGATION_CONCLUDE_INSTRUCTIONS",
+    "INVESTIGATION_PLAN_INSTRUCTIONS",
     "LABEL_CLASSIFICATION_INSTRUCTIONS",
+    "InvestigationConcludeContent",
+    "InvestigationPlanContent",
     "InterpretationContent",
     "LabelClassificationContent",
     "app",

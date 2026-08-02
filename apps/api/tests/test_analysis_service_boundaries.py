@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
+from threading import Barrier, Event, Lock
 from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import text
 
 from flowguard.services.analysis import AnalysisOrchestrator
-from flowguard.services.analysis_support import AIInterpretationClient
+from flowguard.services.analysis_support import AIInterpretationClient, InterpretationOutcome
+from flowguard.services.data import DataService
 from flowguard.storage import FlowGuardRepository
+
+SAMPLE_CSV = (
+    Path(__file__).parents[2]
+    / "web"
+    / "public"
+    / "samples"
+    / "flowguard-synthetic-transactions.csv"
+)
 
 
 def request_payload() -> dict[str, Any]:
@@ -80,6 +94,186 @@ def client_for(handler: httpx.MockTransport) -> AIInterpretationClient:
         total_timeout_seconds=0.1,
         transport=handler,
     )
+
+
+def test_concurrent_identical_analyses_share_one_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = FlowGuardRepository("sqlite:///:memory:")
+    orchestrator = AnalysisOrchestrator(repository)
+    callers_ready = Barrier(5)
+    owner_started = Event()
+    release_owner = Event()
+    counter_lock = Lock()
+    execution_count = 0
+
+    def current_revision(_user_id: str) -> str:
+        callers_ready.wait(timeout=2)
+        return "rev-7"
+
+    def run_once(
+        user_id: str,
+        *,
+        trigger_type: str,
+        as_of: datetime | None,
+    ) -> dict[str, Any]:
+        nonlocal execution_count
+        with counter_lock:
+            execution_count += 1
+        owner_started.set()
+        assert release_owner.wait(timeout=2)
+        return {
+            "analysis_id": "analysis-shared",
+            "user_id": user_id,
+            "trigger_type": trigger_type,
+            "as_of": as_of.isoformat() if as_of is not None else None,
+            "status": "COMPLETED",
+        }
+
+    monkeypatch.setattr(repository, "current_state_revision", current_revision)
+    monkeypatch.setattr(orchestrator, "_run_once", run_once)
+    as_of = datetime.fromisoformat("2026-07-31T09:00:00+09:00")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [
+            executor.submit(
+                orchestrator.run,
+                "user-1",
+                trigger_type="DATA_REFRESH",
+                as_of=as_of,
+            )
+            for _ in range(5)
+        ]
+        assert owner_started.wait(timeout=2)
+        time.sleep(0.05)
+        release_owner.set()
+        responses = [future.result(timeout=2) for future in futures]
+
+    assert execution_count == 1
+    assert {response["analysis_id"] for response in responses} == {"analysis-shared"}
+    assert len({json.dumps(response, sort_keys=True) for response in responses}) == 1
+
+
+def test_concurrent_full_analyses_persist_one_run_and_call_ai_once(tmp_path: Path) -> None:
+    class BlockingAIClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = Event()
+            self.release = Event()
+            self.lock = Lock()
+
+        def interpret(self, _payload: dict[str, Any]) -> InterpretationOutcome:
+            with self.lock:
+                self.calls += 1
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            return InterpretationOutcome(
+                status="FALLBACK",
+                response_payload={},
+                attempt_count=1,
+                latency_ms=1,
+                error_code="test_fallback",
+            )
+
+    database_url = f"sqlite:///{tmp_path / 'concurrent-analysis.db'}"
+    repository = FlowGuardRepository(database_url)
+    DataService(repository).import_csv("user-1", SAMPLE_CSV.read_bytes())
+    ai_client = BlockingAIClient()
+    orchestrator = AnalysisOrchestrator(repository, ai_client=ai_client)  # type: ignore[arg-type]
+    as_of = datetime.fromisoformat("2026-07-31T09:00:00+09:00")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [
+            executor.submit(
+                orchestrator.run,
+                "user-1",
+                trigger_type="DATA_REFRESH",
+                as_of=as_of,
+            )
+            for _ in range(5)
+        ]
+        assert ai_client.started.wait(timeout=5)
+        time.sleep(0.05)
+        ai_client.release.set()
+        responses = [future.result(timeout=10) for future in futures]
+
+    with repository.engine.connect() as connection:
+        analysis_count = connection.execute(text("SELECT COUNT(*) FROM analysis_runs")).scalar_one()
+
+    assert analysis_count == 1
+    assert ai_client.calls == 1
+    assert {response["analysis_id"] for response in responses} == {responses[0]["analysis_id"]}
+    assert all(response["status"] == "COMPLETED" for response in responses)
+
+
+def test_completed_analysis_does_not_block_a_later_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = AnalysisOrchestrator(FlowGuardRepository("sqlite:///:memory:"))
+    execution_count = 0
+
+    def run_once(
+        _user_id: str,
+        *,
+        trigger_type: str,
+        as_of: datetime | None,
+    ) -> dict[str, Any]:
+        nonlocal execution_count
+        execution_count += 1
+        return {
+            "analysis_id": f"analysis-{execution_count}",
+            "trigger_type": trigger_type,
+            "as_of": as_of.isoformat() if as_of is not None else None,
+        }
+
+    monkeypatch.setattr(orchestrator, "_run_once", run_once)
+
+    first = orchestrator.run("user-1")
+    second = orchestrator.run("user-1")
+
+    assert execution_count == 2
+    assert first["analysis_id"] != second["analysis_id"]
+
+
+def test_different_explicit_analysis_times_are_not_coalesced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = FlowGuardRepository("sqlite:///:memory:")
+    orchestrator = AnalysisOrchestrator(repository)
+    owners_ready = Barrier(2)
+    counter_lock = Lock()
+    execution_count = 0
+
+    def run_once(
+        _user_id: str,
+        *,
+        trigger_type: str,
+        as_of: datetime | None,
+    ) -> dict[str, Any]:
+        nonlocal execution_count
+        with counter_lock:
+            execution_count += 1
+        owners_ready.wait(timeout=2)
+        return {
+            "analysis_id": f"analysis-{as_of.isoformat() if as_of is not None else 'now'}",
+            "trigger_type": trigger_type,
+        }
+
+    monkeypatch.setattr(repository, "current_state_revision", lambda _user_id: "rev-7")
+    monkeypatch.setattr(orchestrator, "_run_once", run_once)
+    first_as_of = datetime.fromisoformat("2026-07-31T09:00:00+09:00")
+    second_as_of = datetime.fromisoformat("2026-08-01T09:00:00+09:00")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(orchestrator.run, "user-1", as_of=first_as_of)
+        second = executor.submit(orchestrator.run, "user-1", as_of=second_as_of)
+        analysis_ids = {
+            first.result(timeout=2)["analysis_id"],
+            second.result(timeout=2)["analysis_id"],
+        }
+
+    assert execution_count == 2
+    assert len(analysis_ids) == 2
 
 
 def test_ai_request_identifiers_are_stable_for_same_logical_input() -> None:

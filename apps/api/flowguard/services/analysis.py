@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from threading import Event, Lock
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
+from zoneinfo import ZoneInfo
 
+from flowguard.ai_contract import InvestigationActionType
 from flowguard.config import (
     AI_CONNECT_TIMEOUT_SECONDS,
     AI_CONTRACT_VERSION,
@@ -35,7 +39,8 @@ from flowguard.storage import (
 from .agent_trace import build_decision_trace
 from .analysis_support import AIInterpretationClient
 from .errors import ServiceError
-from .investigator import LiquidityInvestigator
+from .investigation_loop import InvestigationAIClient
+from .investigator import InvestigationMode, LiquidityInvestigator
 from .snapshots import SnapshotBuilder
 from .tools import CoreToolService
 
@@ -51,6 +56,14 @@ STATUS_MESSAGES = {
     "FAILED": "분석에 실패했습니다.",
 }
 logger = logging.getLogger("flowguard.analysis")
+_OMITTED_AS_OF = object()
+
+
+@dataclass(slots=True)
+class _AnalysisInFlight:
+    completion: Event
+    response: dict[str, Any] | None = None
+    exception: BaseException | None = None
 
 
 class AnalysisOrchestrator:
@@ -64,12 +77,25 @@ class AnalysisOrchestrator:
         tools: CoreToolService | None = None,
         investigator: LiquidityInvestigator | None = None,
         ai_client: AIInterpretationClient | None = None,
+        investigation_mode: InvestigationMode = "off",
+        investigation_client: InvestigationAIClient | None = None,
+        investigation_locale: str = AI_DEFAULT_LOCALE,
+        investigation_model_name: str | None = None,
     ) -> None:
         self.repository = repository
         self.snapshot_builder = snapshot_builder or SnapshotBuilder(repository)
         self.tools = tools or CoreToolService(repository)
-        self.investigator = investigator or LiquidityInvestigator(repository, self.tools)
+        self.investigator = investigator or LiquidityInvestigator(
+            repository,
+            self.tools,
+            investigation_mode=investigation_mode,
+            investigation_client=investigation_client,
+            investigation_locale=investigation_locale,
+            investigation_model_name=investigation_model_name,
+        )
         self.cashflow_service = CashflowAnalysisService(self.tools)
+        self._in_flight_lock = Lock()
+        self._in_flight: dict[tuple[str, str, str, object], _AnalysisInFlight] = {}
         self.ai_client = ai_client or AIInterpretationClient(
             base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001"),
             connect_timeout_seconds=float(
@@ -90,6 +116,61 @@ class AnalysisOrchestrator:
         *,
         trigger_type: str = "MANUAL",
         as_of: datetime | None = None,
+    ) -> dict[str, Any]:
+        request_key = (
+            user_id,
+            self.repository.current_state_revision(user_id),
+            trigger_type,
+            self._as_of_key(as_of),
+        )
+        with self._in_flight_lock:
+            pending = self._in_flight.get(request_key)
+            if pending is None:
+                pending = _AnalysisInFlight(completion=Event())
+                self._in_flight[request_key] = pending
+                owns_request = True
+            else:
+                owns_request = False
+
+        if not owns_request:
+            pending.completion.wait()
+            with self._in_flight_lock:
+                response = pending.response
+                exception = pending.exception
+            if exception is not None:
+                raise exception
+            if response is None:
+                raise RuntimeError("analysis owner completed without a response")
+            return response
+
+        try:
+            response = self._run_once(user_id, trigger_type=trigger_type, as_of=as_of)
+            with self._in_flight_lock:
+                pending.response = response
+            return response
+        except BaseException as exc:
+            with self._in_flight_lock:
+                pending.exception = exc
+            raise
+        finally:
+            with self._in_flight_lock:
+                self._in_flight.pop(request_key, None)
+                pending.completion.set()
+
+    @staticmethod
+    def _as_of_key(as_of: datetime | None) -> object:
+        if as_of is None:
+            return _OMITTED_AS_OF
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            return as_of.isoformat()
+        return as_of.astimezone(ZoneInfo("Asia/Seoul")).isoformat()
+
+    def _run_once(
+        self,
+        user_id: str,
+        *,
+        trigger_type: str,
+        as_of: datetime | None,
     ) -> dict[str, Any]:
         analysis_revision: str | None = None
         run = self.repository.create_analysis(
@@ -256,17 +337,43 @@ class AnalysisOrchestrator:
         )
 
         self._transition(analysis_id, "AGENT_INVESTIGATING")
+        investigation_start = snapshot.as_of.date()
+        investigation_horizon_days = int(baseline["analysis_horizon_days"])
         agent_state = self.investigator.investigate(
             analysis_id=analysis_id,
+            user_id=user_id,
             snapshot_id=snapshot.snapshot_id,
+            snapshot_revision=current_state_revision,
             baseline_result=baseline,
+            is_virtual=is_virtual,
+            investigation_targets={
+                "counterpartyIds": sorted(
+                    {receivable.counterparty_id for receivable in snapshot.receivables}
+                ),
+                "eventWindow": {
+                    "dateFrom": investigation_start.isoformat(),
+                    "dateTo": (
+                        investigation_start + timedelta(days=investigation_horizon_days - 1)
+                    ).isoformat(),
+                },
+                "actionTypes": [item.value for item in InvestigationActionType],
+            },
         )
         if "decision_trace" not in agent_state:
             agent_state["decision_trace"] = build_decision_trace(
                 agent_state,
-                mode=getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
-                model=getattr(self.investigator, "agent_model", None),
-                fallback_reason=getattr(self.investigator, "fallback_reason", None),
+                mode=agent_state.get(
+                    "decision_mode",
+                    getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
+                ),
+                model=agent_state.get(
+                    "decision_model",
+                    getattr(self.investigator, "agent_model", None),
+                ),
+                fallback_reason=agent_state.get(
+                    "decision_fallback_reason",
+                    getattr(self.investigator, "fallback_reason", None),
+                ),
             )
         self._transition(
             analysis_id,
@@ -330,12 +437,21 @@ class AnalysisOrchestrator:
                 "model_name": "flowguard-deterministic-core",
                 "model_version": baseline.get("model_version", FINANCIAL_CORE_VERSION),
                 "prompt_version": "rule-based-investigator-1",
-                "agent_mode": getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
-                "agent_model": getattr(self.investigator, "agent_model", None),
-                "agent_prompt_version": getattr(
-                    self.investigator,
-                    "prompt_version",
-                    "rule-based-investigator-1",
+                "agent_mode": agent_state.get(
+                    "decision_mode",
+                    getattr(self.investigator, "agent_mode", "DETERMINISTIC"),
+                ),
+                "agent_model": agent_state.get(
+                    "decision_model",
+                    getattr(self.investigator, "agent_model", None),
+                ),
+                "agent_prompt_version": agent_state.get(
+                    "decision_prompt_version",
+                    getattr(
+                        self.investigator,
+                        "prompt_version",
+                        "rule-based-investigator-1",
+                    ),
                 ),
                 "tool_version": baseline.get("tool_version"),
                 "policy_version": POLICY_VERSION,

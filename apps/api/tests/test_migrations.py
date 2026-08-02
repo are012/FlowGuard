@@ -90,6 +90,48 @@ def test_classification_audit_migration_upgrades_and_downgrades_independently(
     engine.dispose()
 
 
+def test_investigation_audit_migration_upgrades_and_downgrades_independently(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'investigation-migration.db'}"
+    config = _config(database_url)
+
+    command.upgrade(config, "20260802_0002")
+    engine = create_engine(database_url)
+    assert "ai_investigation_runs" not in inspect(engine).get_table_names()
+    assert "ai_investigation_turns" not in inspect(engine).get_table_names()
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    assert {"ai_investigation_runs", "ai_investigation_turns"}.issubset(inspector.get_table_names())
+    assert {
+        "ix_ai_investigation_runs_analysis_id",
+        "ix_ai_investigation_runs_request_id",
+        "ix_ai_investigation_runs_snapshot_id",
+        "ix_ai_investigation_runs_status",
+        "ix_ai_investigation_runs_user_id",
+    }.issubset({item["name"] for item in inspector.get_indexes("ai_investigation_runs")})
+    assert ("idempotency_key",) in {
+        tuple(item["column_names"])
+        for item in inspector.get_unique_constraints("ai_investigation_runs")
+    }
+    assert ("investigation_id", "turn_sequence") in {
+        tuple(item["column_names"])
+        for item in inspector.get_unique_constraints("ai_investigation_turns")
+    }
+    engine.dispose()
+
+    command.downgrade(config, "20260802_0002")
+    engine = create_engine(database_url)
+    table_names = inspect(engine).get_table_names()
+    assert "ai_investigation_runs" not in table_names
+    assert "ai_investigation_turns" not in table_names
+    assert "ai_classification_runs" in table_names
+    engine.dispose()
+
+
 def test_schema_parity_rejects_an_unversioned_database_with_drift(
     tmp_path: Path,
     capsys,

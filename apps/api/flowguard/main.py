@@ -31,6 +31,11 @@ from flowguard.rate_limit import (
 from flowguard.services.analysis import AnalysisOrchestrator
 from flowguard.services.data import ClassificationMode, DataService, LabelClassifier
 from flowguard.services.errors import ServiceError
+from flowguard.services.investigation_loop import (
+    AIInvestigationClient,
+    InvestigationAIClient,
+)
+from flowguard.services.investigator import InvestigationMode
 from flowguard.services.label_group_validation import AILabelClassificationClient
 from flowguard.services.recommendations import RecommendationService
 from flowguard.services.reports import ReportQueryService
@@ -46,6 +51,7 @@ def create_app(
     *,
     rate_limiter: InMemoryRateLimiter | None = None,
     classification_client: LabelClassifier | None = None,
+    investigation_client: InvestigationAIClient | None = None,
 ) -> FastAPI:
     configure_logging()
     app = FastAPI(
@@ -62,6 +68,7 @@ def create_app(
     repository = repository or FlowGuardRepository(create_schema=auto_create_schema)
     tools = CoreToolService(repository)
     classification_mode = _classification_mode()
+    investigation_mode = _investigation_mode()
     if classification_mode != "off" and classification_client is None:
         classification_client = AILabelClassificationClient(
             base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001"),
@@ -85,6 +92,23 @@ def create_app(
             ),
             max_retries=int(os.getenv("FLOWGUARD_AI_MAX_RETRIES", str(AI_MAX_RETRIES))),
         )
+    if investigation_mode != "off" and investigation_client is None:
+        investigation_client = AIInvestigationClient(
+            base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001"),
+            connect_timeout_seconds=float(
+                os.getenv(
+                    "FLOWGUARD_AI_CONNECT_TIMEOUT_SECONDS",
+                    str(AI_CONNECT_TIMEOUT_SECONDS),
+                )
+            ),
+            read_timeout_seconds=float(
+                os.getenv(
+                    "FLOWGUARD_AI_RESPONSE_TIMEOUT_SECONDS",
+                    str(AI_RESPONSE_TIMEOUT_SECONDS),
+                )
+            ),
+            max_retries=int(os.getenv("FLOWGUARD_AI_MAX_RETRIES", str(AI_MAX_RETRIES))),
+        )
     app.state.repository = repository
     app.state.data_service = DataService(
         repository,
@@ -96,6 +120,10 @@ def create_app(
     app.state.analysis_service = AnalysisOrchestrator(
         repository,
         tools=tools,
+        investigation_mode=investigation_mode,
+        investigation_client=investigation_client,
+        investigation_locale=os.getenv("FLOWGUARD_AI_LOCALE", AI_DEFAULT_LOCALE),
+        investigation_model_name=os.getenv("FLOWGUARD_AI_MODEL_NAME", "gpt-5.6-luna"),
     )
     app.state.recommendation_service = RecommendationService(
         repository, tools, app.state.analysis_service
@@ -138,6 +166,20 @@ def _classification_mode() -> ClassificationMode:
             logger,
             logging.WARNING,
             "invalid_ai_classification_mode",
+            configured_mode=configured,
+        )
+    return "off"
+
+
+def _investigation_mode() -> InvestigationMode:
+    configured = os.getenv("FLOWGUARD_AI_INVESTIGATION", "on").strip().lower()
+    if configured in {"shadow", "on"}:
+        return configured
+    if configured not in {"", "off"}:
+        log_event(
+            logger,
+            logging.WARNING,
+            "invalid_ai_investigation_mode",
             configured_mode=configured,
         )
     return "off"
