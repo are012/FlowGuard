@@ -20,10 +20,29 @@ import {
   formatWon,
   normalizeStatus,
 } from "@/lib/format";
-import type { DailyPosition, TimelineResponse, WeeklyPosition } from "@/lib/types";
+import type {
+  DailyPosition,
+  NextRiskResponse,
+  TimelineResponse,
+  WeeklyPosition,
+} from "@/lib/types";
 
 function weekNumber(position: WeeklyPosition, index: number) {
   return typeof position.week === "number" ? position.week : index + 1;
+}
+
+/** 백엔드가 계산한 위험일이 없을 때만 가용잔액이 처음 0원 아래로 내려가는 날을 쓴다. */
+function firstShortfallDate(daily: DailyPosition[]) {
+  return daily.find(
+    (position) =>
+      typeof position.available_balance === "number" &&
+      position.available_balance < 0,
+  )?.date;
+}
+
+function coversDate(position: WeeklyPosition, date: string) {
+  if (!position.start_date || !position.end_date) return false;
+  return position.start_date <= date && date <= position.end_date;
 }
 
 function scenarioName(scenario: NonNullable<TimelineResponse["scenarios"]>[number]) {
@@ -46,6 +65,7 @@ function scenarioName(scenario: NonNullable<TimelineResponse["scenarios"]>[numbe
 export default function CashflowPage() {
   const { data, error, loading, reload } =
     useRemote<TimelineResponse>("/api/v1/cashflow/timeline");
+  const { data: nextRisk } = useRemote<NextRiskResponse>("/api/v1/risks/next");
 
   const daily = data?.daily_positions || [];
   const firstFourWeeks = daily.slice(0, 28);
@@ -61,6 +81,28 @@ export default function CashflowPage() {
       Math.abs(position.available_balance || 0),
     ),
   );
+
+  const riskDate =
+    nextRisk?.risk_metrics?.first_risk_date || firstShortfallDate(daily);
+  const riskIsDerived = Boolean(
+    riskDate && !nextRisk?.risk_metrics?.first_risk_date,
+  );
+  const riskInChart = Boolean(
+    riskDate && firstFourWeeks.some((position) => position.date === riskDate),
+  );
+  const riskWeek = riskDate
+    ? weekly.find((position) => coversDate(position, riskDate))
+    : undefined;
+  const riskStatus = normalizeStatus(nextRisk?.presentation?.status);
+  const riskIndex = riskDate
+    ? daily.findIndex((position) => position.date === riskDate)
+    : -1;
+
+  const overviewBalances = daily
+    .map((position) => position.available_balance)
+    .filter((value): value is number => typeof value === "number");
+  const overviewMax = Math.max(1, ...overviewBalances);
+  const overviewMin = overviewBalances.length ? Math.min(...overviewBalances) : undefined;
 
   if (loading && !data) return <LoadingState label="13주 현금흐름을 펼치고 있어요" />;
   if (error instanceof ApiError && error.status === 404 && !data) {
@@ -121,6 +163,134 @@ export default function CashflowPage() {
 
       <section>
         <SectionHeading
+          eyebrow="13주 전체"
+          title="언제 부족해지는지 한눈에"
+          description={`분석 기간 ${daily.length}일의 가용잔액 흐름입니다. 위험 시점이 전체 흐름에서 어디에 있는지 먼저 확인하세요.`}
+          aside={
+            <div className="chart-legend">
+              <span><i className="legend-safe" /> 위험 이전</span>
+              {riskDate && <span><i className="legend-after-risk" /> 위험 이후</span>}
+              {riskDate && <span><i className="legend-marker" /> 위험 시점</span>}
+            </div>
+          }
+        />
+
+        {riskDate && (
+          <div
+            className={`risk-callout risk-callout-${riskStatus?.toLowerCase() || "unknown"}`}
+          >
+            <span className="risk-callout-icon">
+              <Icon name="calendar" size={19} />
+            </span>
+            <div>
+              <strong>
+                {formatDate(riskDate)}에 첫 위험이 있어요
+                {riskWeek?.week ? ` · ${riskWeek.week}주 차` : ""}
+              </strong>
+              <p>
+                {nextRisk?.presentation?.impact ||
+                  "표시된 시점부터 준비가 필요한 결제가 있습니다."}
+              </p>
+              {riskIsDerived && (
+                <small>
+                  분석 결과에 위험일이 없어 가용잔액이 처음 0원 아래로 내려가는
+                  날짜로 표시했습니다.
+                </small>
+              )}
+              {!riskInChart && (
+                <small>
+                  아래 1~4주 상세 그래프 범위 밖이라 주차 카드에도 표시했습니다.
+                </small>
+              )}
+            </div>
+            <Link className="inline-link" href="/risk">
+              위험 근거 보기
+              <Icon name="arrow" size={16} />
+            </Link>
+          </div>
+        )}
+
+        <div className="overview-chart card">
+          <div
+            className="overview-bars"
+            style={{ gridTemplateColumns: `repeat(${daily.length}, minmax(0, 1fr))` }}
+            aria-label={`${daily.length}일 가용잔액 흐름 그래프`}
+          >
+            {daily.map((position, index) => {
+              const balance = position.available_balance;
+              const height =
+                typeof balance === "number"
+                  ? Math.max(6, (balance / overviewMax) * 100)
+                  : 6;
+              const isRiskDay = index === riskIndex;
+              const isAfterRisk = riskIndex >= 0 && index > riskIndex;
+              return (
+                <span
+                  className={`overview-bar${isRiskDay ? " is-risk" : ""}${
+                    isAfterRisk ? " is-after-risk" : ""
+                  }${typeof balance !== "number" ? " unknown" : ""}`}
+                  key={`overview-${position.date}-${index}`}
+                  style={{ height: `${height}%` }}
+                  title={
+                    typeof balance === "number"
+                      ? `${formatDate(position.date)} ${formatWon(balance)}${
+                          isRiskDay ? " · 첫 위험 시점" : ""
+                        }`
+                      : `${formatDate(position.date)} 잔액 정보 없음`
+                  }
+                />
+              );
+            })}
+
+            {riskIndex >= 0 && (
+              <span
+                className="overview-risk-marker"
+                style={{ left: `${((riskIndex + 0.5) / daily.length) * 100}%` }}
+              >
+                <span className="overview-risk-flag">
+                  {formatShortDate(riskDate)} 첫 위험
+                </span>
+              </span>
+            )}
+          </div>
+
+          <div className="overview-axis" aria-hidden="true">
+            {[0, 4, 8, 12].map((week) => {
+              const position = daily[week * 7];
+              if (!position) return null;
+              return (
+                <span
+                  key={`tick-${week}`}
+                  style={{ left: `${((week * 7) / daily.length) * 100}%` }}
+                >
+                  {week + 1}주
+                </span>
+              );
+            })}
+          </div>
+
+          <div className="overview-facts">
+            <div>
+              <small>기간 내 최소 가용잔액</small>
+              <strong>
+                {typeof overviewMin === "number"
+                  ? formatWon(overviewMin)
+                  : "정보 없음"}
+              </strong>
+            </div>
+            <div>
+              <small>분석 기간</small>
+              <strong>
+                {formatShortDate(daily.at(0)?.date)} –{" "}
+                {formatShortDate(daily.at(-1)?.date)}
+              </strong>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <SectionHeading
           eyebrow="1–4주"
           title="날짜별 예상 가용잔액"
           description="막대는 API가 계산한 매일의 가용잔액이며, 아래 표에서 결제 영향을 함께 확인할 수 있어요."
@@ -128,6 +298,7 @@ export default function CashflowPage() {
             <div className="chart-legend">
               <span><i className="legend-safe" /> 가용자금</span>
               <span><i className="legend-risk" /> 0원 미만</span>
+              {riskDate && <span><i className="legend-marker" /> 위험 시점</span>}
             </div>
           }
         />
@@ -144,8 +315,18 @@ export default function CashflowPage() {
                   ? Math.max(5, (Math.abs(balance) / maxAbsoluteBalance) * 76)
                   : 5;
               const negative = typeof balance === "number" && balance < 0;
+              const isRiskDay = Boolean(riskDate) && position.date === riskDate;
               return (
-                <div className="bar-column" key={`${position.date}-${index}`}>
+                <div
+                  className={`bar-column${isRiskDay ? " is-risk-day" : ""}`}
+                  key={`${position.date}-${index}`}
+                >
+                  {isRiskDay && (
+                    <span className="risk-marker">
+                      <span className="risk-marker-flag">위험</span>
+                      <span className="risk-marker-line" aria-hidden="true" />
+                    </span>
+                  )}
                   <span
                     className={`cashflow-bar ${negative ? "negative" : ""} ${
                       typeof balance !== "number" ? "unknown" : ""
@@ -153,7 +334,9 @@ export default function CashflowPage() {
                     style={{ height: `${height}%` }}
                     title={
                       typeof balance === "number"
-                        ? `${formatDate(position.date)} ${formatWon(balance)}`
+                        ? `${formatDate(position.date)} ${formatWon(balance)}${
+                            isRiskDay ? " · 첫 위험 시점" : ""
+                          }`
                         : `${formatDate(position.date)} 잔액 정보 없음`
                     }
                   />
@@ -176,7 +359,12 @@ export default function CashflowPage() {
           </div>
           <div className="cashflow-table-body">
             {firstFourWeeks.map((position: DailyPosition, index) => (
-              <div className="cashflow-row" key={`${position.date}-row-${index}`}>
+              <div
+                className={`cashflow-row${
+                  riskDate && position.date === riskDate ? " is-risk-row" : ""
+                }`}
+                key={`${position.date}-row-${index}`}
+              >
                 <strong>{formatDate(position.date)}</strong>
                 <span>
                   {position.triggering_event_ids?.length
@@ -220,15 +408,24 @@ export default function CashflowPage() {
               const sourceIndex = weekly.indexOf(position);
               const week = weekNumber(position, sourceIndex);
               const status = normalizeStatus(position.status);
+              const holdsRisk = Boolean(riskDate) && position === riskWeek;
               return (
                 <article
-                  className={`week-card week-${status?.toLowerCase() || "unknown"}`}
+                  className={`week-card week-${status?.toLowerCase() || "unknown"}${
+                    holdsRisk ? " is-risk-week" : ""
+                  }`}
                   key={`${week}-${position.start_date || index}`}
                 >
                   <div className="week-card-top">
                     <span>{week}주 차</span>
                     <StatusPill status={position.status} />
                   </div>
+                  {holdsRisk && riskDate && (
+                    <span className="week-risk-flag">
+                      <Icon name="calendar" size={13} />
+                      {formatShortDate(riskDate)} 첫 위험
+                    </span>
+                  )}
                   <p>
                     {formatShortDate(position.start_date)} –{" "}
                     {formatShortDate(position.end_date)}

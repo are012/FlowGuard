@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
 
+import { AnalysisProgress } from "@/components/analysis-progress";
 import { Icon } from "@/components/icons";
 import { PageIntro, SubmitNotice } from "@/components/ui";
 import { apiRequest, listFrom, useRemote } from "@/lib/api";
@@ -122,6 +123,7 @@ export default function SetupPage() {
   >({});
   const [analysisResult, setAnalysisResult] = useState<AnalysisResponse>();
   const [busy, setBusy] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const accountsRemote =
@@ -310,6 +312,7 @@ export default function SetupPage() {
     }
 
     setBusy(true);
+    setAnalyzing(true);
     setError(undefined);
     setNotice(undefined);
 
@@ -371,6 +374,7 @@ export default function SetupPage() {
       );
     } finally {
       setBusy(false);
+      setAnalyzing(false);
     }
   }
 
@@ -1127,13 +1131,19 @@ export default function SetupPage() {
                     onClick={startAnalysis}
                     type="button"
                   >
-                    {busy ? "분석을 시작하는 중..." : "확인 저장하고 분석 시작"}
+                    {analyzing
+                      ? "분석하는 중..."
+                      : busy
+                        ? "처리하는 중..."
+                        : "확인 저장하고 분석 시작"}
                     {!busy && <Icon name="arrow" size={17} />}
                   </button>
                 </div>
               </div>
             </section>
           )}
+
+          {analyzing && <AnalysisProgress />}
 
           {analysisResult && (
             <section className="setup-complete card">
