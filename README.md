@@ -39,7 +39,7 @@ make dev-ai         # http://localhost:8001
 | [SPECIFICATION.md](SPECIFICATION.md) | 구현 명세 — 데이터 규칙 · 계약 · MCP 도구 · API · 실패 처리 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 로컬 실행, 검증 방법, 운영 안전장치 |
 | [docs/BACKLOG.md](docs/BACKLOG.md) | 검증으로 확인한 개선 목록과 해결 기록 |
-| [docs/plans/](docs/plans/) | 진행 중인 설계 문서 |
+| [docs/plans/](docs/plans/) | AI 역할 확장 설계와 실측 결과 |
 
 실행 가능한 MVP는 `apps/api`(FastAPI)와 `apps/web`(Next.js)에 있으며,
 선택적 AI 프로세스 진입점은 [`apps/ai-service`](apps/ai-service/README.md)에 있습니다.
