@@ -19,3 +19,7 @@ coverage/
 !.env.example
 
 .DS_Store
+
+# 발표·제출 산출물은 저장소에 두지 않는다 (바이너리 히스토리 누적 방지)
+*.pptx
+*.pdf
