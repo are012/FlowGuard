@@ -88,6 +88,14 @@ export function normalizeStatus(value?: string): RiskStatus | undefined {
   return undefined;
 }
 
+export function worstCaseSafetyMargin(position: DailyPosition) {
+  if (typeof position.worst_case_safety_margin === "number") {
+    return position.worst_case_safety_margin;
+  }
+  if (typeof position.safety_margin === "number") return position.safety_margin;
+  return position.available_balance;
+}
+
 export function recommendationId(item: Recommendation) {
   return item.recommendation_id || item.id;
 }
@@ -148,6 +156,9 @@ export function deriveWeeklyPositions(daily: DailyPosition[]): WeeklyPosition[] 
     const available = positions
       .map((position) => position.available_balance)
       .filter((value): value is number => typeof value === "number");
+    const safetyMargins = positions
+      .map(worstCaseSafetyMargin)
+      .filter((value): value is number => typeof value === "number");
     const order: RiskStatus[] = ["STABLE", "VERIFY", "PREPARE", "ACT_NOW"];
     const statuses = positions
       .map((position) => normalizeStatus(position.status))
@@ -163,6 +174,7 @@ export function deriveWeeklyPositions(daily: DailyPosition[]): WeeklyPosition[] 
       start_date: positions.at(0)?.date,
       end_date: positions.at(-1)?.date,
       min_available_balance: available.length ? Math.min(...available) : undefined,
+      min_safety_margin: safetyMargins.length ? Math.min(...safetyMargins) : undefined,
       status,
       causes: [],
     };

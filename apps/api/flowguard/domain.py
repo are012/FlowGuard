@@ -328,6 +328,8 @@ class DailyPosition(DomainModel):
     account_balances: dict[str, int]
     total_balance: int
     available_balance: int
+    liquidity_margin: int
+    payment_account_margin: int
     protected_balance: int
     status: RiskStatus
     triggering_event_ids: tuple[str, ...] = ()

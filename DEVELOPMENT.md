@@ -179,7 +179,7 @@ still completes and exposes the deterministic fallback interpretation.
 Open `http://localhost:3000`, download the explicit sample CSV from the setup
 screen, and upload it. Until data is imported, the UI shows a real empty state;
 it does not substitute demo analysis results. The bundled sample is analyzed at
-the fixed scenario time `2026-07-24T09:00:00+09:00`, so the contest walkthrough
+the fixed scenario time `2026-07-31T09:00:00+09:00`, so the contest walkthrough
 remains reproducible. The setup screen can reset only the current demo user's
 local data and analysis artifacts.
 

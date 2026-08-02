@@ -68,8 +68,20 @@
   background: var(--red);
 }
 
-.legend-after-risk {
-  background: #d8a99e;
+.legend-stable {
+  background: var(--green);
+}
+
+.legend-verify {
+  background: var(--blue);
+}
+
+.legend-prepare {
+  background: var(--yellow);
+}
+
+.legend-act-now {
+  background: var(--red);
 }
 
 .legend-marker {
@@ -157,37 +169,70 @@
 }
 
 .overview-bars {
-  align-items: end;
   display: grid;
-  gap: 1px;
-  height: 118px;
+  gap: 7px;
+  height: 136px;
   position: relative;
 }
 
-.overview-bar {
-  background: linear-gradient(180deg, #9ccfb5, var(--green));
-  border-radius: 2px 2px 0 0;
+.overview-zero-line {
+  border-top: 1px dashed var(--line-strong);
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  z-index: 0;
+}
+
+.overview-bar-column {
   display: block;
-  min-height: 6px;
+  height: 100%;
+  position: relative;
+  z-index: 1;
+}
+
+.overview-bar {
+  border-radius: 4px 4px 2px 2px;
+  display: block;
+  left: 20%;
+  min-height: 3px;
   opacity: 0.7;
+  position: absolute;
+  right: 20%;
   transition: opacity 150ms ease;
-  width: 100%;
 }
 
 .overview-bar:hover {
   opacity: 1;
 }
 
-.overview-bar.is-after-risk {
-  background: linear-gradient(180deg, #d8a99e, var(--red));
-  opacity: 0.62;
+.overview-bar.is-positive {
+  bottom: 50%;
 }
 
-.overview-bar.is-risk {
+.overview-bar.is-negative {
+  border-radius: 2px 2px 4px 4px;
+  top: 50%;
+}
+
+.overview-bar.status-stable {
+  background: var(--green);
+}
+
+.overview-bar.status-verify {
+  background: var(--blue);
+}
+
+.overview-bar.status-prepare {
+  background: var(--yellow);
+}
+
+.overview-bar.status-act_now {
   background: var(--red);
   opacity: 1;
 }
 
+.overview-bar.status-unknown,
 .overview-bar.unknown {
   background: var(--line);
 }
@@ -197,20 +242,20 @@
   bottom: 0;
   pointer-events: none;
   position: absolute;
-  top: -6px;
+  top: 0;
   z-index: 2;
 }
 
 .overview-risk-flag {
   background: var(--red);
   border-radius: 999px;
-  bottom: calc(100% + 5px);
   color: #fff;
   font-size: 9px;
   font-weight: 800;
   left: 50%;
   padding: 3px 9px;
   position: absolute;
+  top: -28px;
   transform: translateX(-50%);
   white-space: nowrap;
 }
@@ -227,7 +272,7 @@
   font-size: 9px;
   padding-top: 6px;
   position: absolute;
-  transform: translateX(-2px);
+  transform: translateX(-50%);
 }
 
 .overview-facts {
@@ -258,10 +303,10 @@
 
 .chart-zero-line {
   border-top: 1px dashed var(--line-strong);
-  bottom: 53px;
   left: 24px;
   position: absolute;
   right: 24px;
+  top: 50%;
 }
 
 .chart-zero-line span {
@@ -286,11 +331,8 @@
 }
 
 .bar-column {
-  align-items: center;
-  display: flex;
-  flex-direction: column;
+  display: block;
   height: 100%;
-  justify-content: flex-end;
   position: relative;
 }
 
@@ -298,15 +340,27 @@
   background: linear-gradient(180deg, #76b796, var(--green));
   border-radius: 5px 5px 2px 2px;
   display: block;
-  min-height: 5px;
+  left: 50%;
+  min-height: 3px;
   opacity: 0.82;
+  position: absolute;
+  transform: translateX(-50%);
   transition: 150ms ease;
   width: min(14px, 74%);
 }
 
 .cashflow-bar:hover {
   opacity: 1;
-  transform: scaleX(1.16);
+  transform: translateX(-50%) scaleX(1.16);
+}
+
+.cashflow-bar.is-positive {
+  bottom: 50%;
+}
+
+.cashflow-bar.is-negative {
+  border-radius: 2px 2px 5px 5px;
+  top: 50%;
 }
 
 .cashflow-bar.negative {

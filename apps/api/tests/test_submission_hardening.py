@@ -11,6 +11,7 @@ from flowguard.services.investigator import LiquidityInvestigator, RiskEvidenceB
 from flowguard.storage import FlowGuardRepository, RecordNotFound
 
 AS_OF = "2026-07-24T09:00:00+09:00"
+DEMO_AS_OF = "2026-07-31T09:00:00+09:00"
 SAMPLE_CSV = (
     Path(__file__).parents[2]
     / "web"
@@ -80,7 +81,7 @@ def test_demo_import_exposes_fixed_analysis_time_only_in_demo_mode() -> None:
             )
         assert demo.status_code == 201
         assert demo.json()["is_demo"] is True
-        assert demo.json()["analysis_as_of"] == AS_OF
+        assert demo.json()["analysis_as_of"] == DEMO_AS_OF
 
         regular = client.post(
             "/api/v1/imports/transactions",
@@ -221,7 +222,7 @@ def test_recommendation_contains_derivation_and_comparison() -> None:
     assert derivation["source_value"] == 50_000
     assert derivation["snapshot_id"] == recommendation["snapshot_id"]
     assert derivation["revision"] == recommendation["current_state_revision"]
-    assert derivation["tool_version"] == "cashflow-1"
+    assert derivation["tool_version"] == "cashflow-2"
     assert derivation["policy_version"] == "policy-1"
     assert "bill" in derivation["evidence_ids"]
 

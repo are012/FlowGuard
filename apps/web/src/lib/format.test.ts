@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveWeeklyPositions, formatDate, formatWon } from "@/lib/format";
+import {
+  deriveWeeklyPositions,
+  formatDate,
+  formatWon,
+  worstCaseSafetyMargin,
+} from "@/lib/format";
 import type { DailyPosition } from "@/lib/types";
 
 describe("formatWon", () => {
@@ -28,11 +33,26 @@ describe("formatDate", () => {
 });
 
 describe("deriveWeeklyPositions", () => {
-  it("groups consecutive days into weeks and keeps the worst status and balance", () => {
+  it("groups consecutive days into weeks and keeps the worst status, balance, and safety margin", () => {
     const daily: DailyPosition[] = [
-      { date: "2026-08-01", available_balance: 80_000, status: "STABLE" },
-      { date: "2026-08-02", available_balance: 45_000, status: "VERIFY" },
-      { date: "2026-08-03", available_balance: 60_000, status: "PREPARE" },
+      {
+        date: "2026-08-01",
+        available_balance: 80_000,
+        worst_case_safety_margin: 20_000,
+        status: "STABLE",
+      },
+      {
+        date: "2026-08-02",
+        available_balance: 45_000,
+        worst_case_safety_margin: -15_000,
+        status: "VERIFY",
+      },
+      {
+        date: "2026-08-03",
+        available_balance: 60_000,
+        safety_margin: 10_000,
+        status: "PREPARE",
+      },
       { date: "2026-08-04", available_balance: 30_000, status: "ACT_NOW" },
       { date: "2026-08-05", available_balance: 50_000, status: "STABLE" },
       { date: "2026-08-06", available_balance: 70_000 },
@@ -46,6 +66,7 @@ describe("deriveWeeklyPositions", () => {
         start_date: "2026-08-01",
         end_date: "2026-08-07",
         min_available_balance: 30_000,
+        min_safety_margin: -15_000,
         status: "ACT_NOW",
         causes: [],
       },
@@ -54,6 +75,7 @@ describe("deriveWeeklyPositions", () => {
         start_date: "2026-08-08",
         end_date: "2026-08-08",
         min_available_balance: 120_000,
+        min_safety_margin: 120_000,
         status: "STABLE",
         causes: [],
       },
@@ -67,10 +89,35 @@ describe("deriveWeeklyPositions", () => {
         start_date: "2026-08-01",
         end_date: "2026-08-01",
         min_available_balance: undefined,
+        min_safety_margin: undefined,
         status: undefined,
         causes: [],
       },
     ]);
     expect(deriveWeeklyPositions([])).toEqual([]);
+  });
+});
+
+describe("worstCaseSafetyMargin", () => {
+  it("prefers the worst-case contract and keeps legacy fallbacks", () => {
+    expect(
+      worstCaseSafetyMargin({
+        date: "2026-08-01",
+        available_balance: 90_000,
+        safety_margin: 40_000,
+        worst_case_safety_margin: -10_000,
+      }),
+    ).toBe(-10_000);
+    expect(
+      worstCaseSafetyMargin({
+        date: "2026-08-01",
+        available_balance: 90_000,
+        safety_margin: 40_000,
+      }),
+    ).toBe(40_000);
+    expect(
+      worstCaseSafetyMargin({ date: "2026-08-01", available_balance: 90_000 }),
+    ).toBe(90_000);
+    expect(worstCaseSafetyMargin({ date: "2026-08-01" })).toBeUndefined();
   });
 });

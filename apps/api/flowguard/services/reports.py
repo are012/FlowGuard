@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from flowguard.storage import FlowGuardRepository, RecordNotFound
 
 from .errors import ServiceError
 from .tools import CoreToolService
+
+_STATUS_SEVERITY = {
+    "STABLE": 0,
+    "VERIFY": 1,
+    "PREPARE": 2,
+    "ACT_NOW": 3,
+}
 
 
 class ReportQueryService:
@@ -113,6 +121,16 @@ class ReportQueryService:
     def cashflow_timeline(self, user_id: str) -> dict[str, Any]:
         report = self.latest(user_id)
         cashflow = report["cashflow"]
+        shortfall_type = report["risk_metrics"].get("shortfall_type")
+        (
+            margin_field,
+            balance_basis,
+            balance_basis_label,
+            requires_reanalysis,
+        ) = self._margin_contract(
+            cashflow,
+            shortfall_type=shortfall_type,
+        )
         labels = {
             "ON_TIME": "기준",
             "DELAY_3_DAYS": "3일 지연",
@@ -128,16 +146,174 @@ class ReportQueryService:
             }
             for scenario in cashflow["scenarios"]
         ]
+        scenario_positions = [scenario["daily_positions"] for scenario in scenarios]
+        daily_positions = [
+            {
+                **position,
+                "safety_margin": position[margin_field],
+                "worst_case_safety_margin": min(
+                    scenario[index][margin_field] for scenario in scenario_positions
+                ),
+            }
+            for index, position in enumerate(cashflow["daily_positions"])
+        ]
+        event_descriptions: dict[str, str] = {}
+        if daily_positions:
+            events = self.tools.query_financial_events(
+                report["snapshot_id"],
+                date_from=self._date(str(self._value(daily_positions[0], "date"))),
+                date_to=self._date(str(self._value(daily_positions[-1], "date"))),
+            )["events"]
+            event_descriptions = {
+                str(event["event_id"]): str(event["description"])
+                for event in sorted(
+                    events,
+                    key=lambda event: (
+                        event.get("direction") != "OUTFLOW",
+                        event.get("expected_date", ""),
+                        event.get("event_id", ""),
+                    ),
+                )
+                if event.get("event_id") and event.get("description")
+            }
+        weekly_positions = self._weekly_positions(
+            cashflow,
+            margin_field=margin_field,
+            event_descriptions=event_descriptions,
+        )
         return {
             "analysis_id": report["analysis_id"],
             "snapshot_id": report["snapshot_id"],
             "as_of": report["as_of"],
             "analysis_horizon_days": cashflow["analysis_horizon_days"],
             "horizon_days": cashflow["analysis_horizon_days"],
-            "daily_positions": cashflow["daily_positions"],
+            "daily_positions": daily_positions,
+            "weekly_positions": weekly_positions,
             "scenarios": scenarios,
+            "balance_basis": balance_basis,
+            "balance_basis_label": balance_basis_label,
+            "requires_reanalysis": requires_reanalysis,
             "is_virtual": report.get("is_virtual", False),
         }
+
+    @classmethod
+    def _margin_contract(
+        cls,
+        cashflow: Mapping[str, Any],
+        *,
+        shortfall_type: str | None,
+    ) -> tuple[str, str, str, bool]:
+        desired_field = (
+            "payment_account_margin" if shortfall_type == "PAYMENT_ACCOUNT" else "liquidity_margin"
+        )
+        desired_basis = (
+            "PAYMENT_ACCOUNT" if shortfall_type == "PAYMENT_ACCOUNT" else "TOTAL_LIQUIDITY"
+        )
+        positions = list(cashflow.get("daily_positions", ()))
+        positions.extend(
+            position
+            for scenario in cashflow.get("scenarios", ())
+            for position in (cls._value(scenario, "daily_positions") or ())
+        )
+        if positions and all(
+            isinstance(cls._value(position, desired_field), (int, float)) for position in positions
+        ):
+            label = (
+                "결제계좌 안전여유"
+                if desired_basis == "PAYMENT_ACCOUNT"
+                else "전체 유동성 안전여유"
+            )
+            return desired_field, desired_basis, label, False
+        return (
+            "available_balance",
+            "LEGACY_AVAILABLE_BALANCE",
+            "전체 가용잔액 · 다시 분석 필요",
+            True,
+        )
+
+    @classmethod
+    def _weekly_positions(
+        cls,
+        cashflow: Mapping[str, Any],
+        *,
+        margin_field: str,
+        event_descriptions: Mapping[str, str],
+    ) -> list[dict[str, Any]]:
+        baseline_positions = list(cashflow.get("daily_positions", ()))
+        scenario_positions = [
+            list(cls._value(scenario, "daily_positions") or ())
+            for scenario in cashflow.get("scenarios", ())
+        ]
+        if not scenario_positions:
+            scenario_positions = [baseline_positions]
+
+        weekly_positions: list[dict[str, Any]] = []
+        for start_index in range(0, len(baseline_positions), 7):
+            baseline_week = baseline_positions[start_index : start_index + 7]
+            all_positions = [
+                position
+                for positions in scenario_positions
+                for position in positions[start_index : start_index + 7]
+            ]
+            available_balances = [
+                value
+                for position in all_positions
+                if isinstance(
+                    (value := cls._value(position, "available_balance")),
+                    (int, float),
+                )
+            ]
+            safety_margins = [
+                value
+                for position in all_positions
+                if isinstance(
+                    (value := cls._value(position, margin_field)),
+                    (int, float),
+                )
+            ]
+            statuses = [
+                normalized
+                for position in all_positions
+                if (normalized := cls._status_value(cls._value(position, "status")))
+                in _STATUS_SEVERITY
+            ]
+            status = max(statuses, key=_STATUS_SEVERITY.__getitem__) if statuses else None
+            triggering_event_ids = {
+                str(event_id)
+                for position in all_positions
+                for event_id in (cls._value(position, "triggering_event_ids") or ())
+            }
+            causes: list[str] = []
+            for event_id, description in event_descriptions.items():
+                if event_id in triggering_event_ids and description not in causes:
+                    causes.append(description)
+
+            weekly_positions.append(
+                {
+                    "week": start_index // 7 + 1,
+                    "start_date": cls._value(baseline_week[0], "date"),
+                    "end_date": cls._value(baseline_week[-1], "date"),
+                    "min_available_balance": (
+                        min(available_balances) if available_balances else None
+                    ),
+                    "min_safety_margin": min(safety_margins) if safety_margins else None,
+                    "status": status,
+                    "causes": causes,
+                }
+            )
+        return weekly_positions
+
+    @staticmethod
+    def _value(item: Any, field: str) -> Any:
+        if isinstance(item, Mapping):
+            return item.get(field)
+        return getattr(item, field, None)
+
+    @staticmethod
+    def _status_value(value: Any) -> str | None:
+        if value is None:
+            return None
+        return str(getattr(value, "value", value))
 
     def next_risk(self, user_id: str) -> dict[str, Any]:
         report = self.latest(user_id)

@@ -5,7 +5,7 @@ export type CandidateDetails = Record<string, string>;
 export type ListResponse<T> = T[] | { items?: T[] } | { data?: T[] };
 
 export const SAMPLE_FILE_NAME = "flowguard-synthetic-transactions.csv";
-export const SAMPLE_ANALYSIS_AS_OF = "2026-07-24T09:00:00+09:00";
+export const SAMPLE_ANALYSIS_AS_OF = "2026-07-31T09:00:00+09:00";
 
 export const promotionFields: Record<
   string,

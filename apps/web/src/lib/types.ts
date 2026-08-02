@@ -241,6 +241,10 @@ export interface DailyPosition {
   account_balances?: Record<string, number>;
   total_balance?: number;
   available_balance?: number;
+  liquidity_margin?: number;
+  payment_account_margin?: number;
+  safety_margin?: number;
+  worst_case_safety_margin?: number;
   protected_balance?: number;
   triggering_event_ids?: string[];
   status?: RiskStatus;
@@ -251,6 +255,7 @@ export interface WeeklyPosition {
   start_date?: string;
   end_date?: string;
   min_available_balance?: number;
+  min_safety_margin?: number;
   status?: RiskStatus;
   causes?: string[];
 }
@@ -267,6 +272,9 @@ export interface Scenario {
 export interface TimelineResponse {
   as_of?: string;
   horizon_days?: number;
+  balance_basis?: string;
+  balance_basis_label?: string;
+  requires_reanalysis?: boolean;
   daily_positions?: DailyPosition[];
   weekly_positions?: WeeklyPosition[];
   scenarios?: Array<Scenario | string>;

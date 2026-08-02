@@ -301,13 +301,41 @@ def _pooled_available_balance(
 ) -> int:
     """Return net liquidity so one positive account cannot cover a deficit twice."""
 
+    return max(0, _liquidity_margin(snapshot, accounts, balances, protected))
+
+
+def _liquidity_margin(
+    snapshot: FinancialSnapshot,
+    accounts: dict[str, Account],
+    balances: dict[str, int],
+    protected: dict[str, int],
+) -> int:
+    """Return the signed margin after every configured liquidity floor."""
+
     net_after_account_floors = sum(
         balances[account_id] - protected[account_id] - account.minimum_balance
         for account_id, account in accounts.items()
     )
-    return max(
-        0,
-        net_after_account_floors - snapshot.preferences.minimum_total_reserve,
+    return net_after_account_floors - snapshot.preferences.minimum_total_reserve
+
+
+def _payment_account_margin(
+    snapshot: FinancialSnapshot,
+    accounts: dict[str, Account],
+    balances: dict[str, int],
+    protected: dict[str, int],
+    payment_account_ids: set[str],
+) -> int:
+    """Return the smallest signed safety margin among accounts used for outflows."""
+
+    relevant_ids = payment_account_ids or {
+        account_id for account_id, account in accounts.items() if account.is_payment_account
+    }
+    if not relevant_ids:
+        return _liquidity_margin(snapshot, accounts, balances, protected)
+    return min(
+        balances[account_id] - protected[account_id] - accounts[account_id].minimum_balance
+        for account_id in relevant_ids
     )
 
 
@@ -321,6 +349,16 @@ def _simulate_scenario(
     balances = {account.account_id: account.balance for account in snapshot.accounts}
     protected = _protected_by_account(snapshot)
     events_by_date = _events_for_scenario(snapshot, events, scenario)
+    end_date = start_date + timedelta(days=ANALYSIS_HORIZON_DAYS)
+    payment_account_ids = (
+        {account.account_id for account in snapshot.accounts if account.is_payment_account}
+        | {card.payment_account_id for card in snapshot.cards}
+        | {
+            event.account_id
+            for event in events
+            if event.direction == Direction.OUTFLOW and start_date <= event.expected_date < end_date
+        }
+    )
 
     positions: list[DailyPosition] = []
     shortfalls: list[ShortfallIncident] = []
@@ -390,6 +428,19 @@ def _simulate_scenario(
                     balances,
                     protected,
                 ),
+                liquidity_margin=_liquidity_margin(
+                    snapshot,
+                    accounts,
+                    balances,
+                    protected,
+                ),
+                payment_account_margin=_payment_account_margin(
+                    snapshot,
+                    accounts,
+                    balances,
+                    protected,
+                    payment_account_ids,
+                ),
                 protected_balance=protected_balance,
                 status=RiskStatus.STABLE,
                 triggering_event_ids=tuple(triggering_event_ids),
@@ -404,18 +455,26 @@ def _simulate_scenario(
     )
 
 
-def _data_confidence(snapshot: FinancialSnapshot) -> tuple[float, bool]:
-    quality = snapshot.data_quality
+def _has_automatically_stale_source(snapshot: FinancialSnapshot) -> bool:
     stale_cutoff = snapshot.as_of - timedelta(days=STALE_SOURCE_DAYS)
-    automatically_stale = any(
+    return any(
         updated_at < stale_cutoff
         for updated_at in (
             *(account.updated_at for account in snapshot.accounts),
             *(card.updated_at for card in snapshot.cards),
             *(counterparty.updated_at for counterparty in snapshot.counterparties),
-            *(receivable.updated_at for receivable in snapshot.receivables),
+            *(
+                receivable.updated_at
+                for receivable in snapshot.receivables
+                if receivable.status not in {ReceivableStatus.RECEIVED, ReceivableStatus.CANCELLED}
+            ),
         )
     )
+
+
+def _data_confidence(snapshot: FinancialSnapshot) -> tuple[float, bool]:
+    quality = snapshot.data_quality
+    automatically_stale = _has_automatically_stale_source(snapshot)
     unconfirmed_receivables = sum(
         not receivable.user_confirmed
         and receivable.status in {ReceivableStatus.ESTIMATED, ReceivableStatus.OVERDUE}
@@ -437,6 +496,44 @@ def _data_confidence(snapshot: FinancialSnapshot) -> tuple[float, bool]:
         or unconfirmed_receivables
     )
     return max(MINIMUM_DATA_CONFIDENCE, min(1.0, confidence)), requires_verification
+
+
+def _daily_verification_scope(snapshot: FinancialSnapshot) -> tuple[bool, set[date]]:
+    """Separate persistent source gaps from uncertainty tied to specific dates."""
+
+    quality = snapshot.data_quality
+    global_verification = bool(
+        quality.missing_sources
+        or quality.stale_sources
+        or _has_automatically_stale_source(snapshot)
+    )
+    relevant_dates: set[date] = set()
+    max_delay_days = max(DELAY_SCENARIO_DAYS.values())
+    for receivable in snapshot.receivables:
+        if receivable.status in {
+            ReceivableStatus.RECEIVED,
+            ReceivableStatus.CANCELLED,
+        }:
+            continue
+        if (
+            receivable.status
+            not in {
+                ReceivableStatus.ESTIMATED,
+                ReceivableStatus.OVERDUE,
+            }
+            and receivable.user_confirmed
+        ):
+            continue
+        first_date = max(snapshot.as_of.date(), receivable.expected_date)
+        relevant_dates.update(
+            first_date + timedelta(days=offset) for offset in range(max_delay_days + 1)
+        )
+    relevant_dates.update(
+        event.expected_date
+        for event in snapshot.scheduled_events
+        if event.certainty == Certainty.ESTIMATED and event.expected_date >= snapshot.as_of.date()
+    )
+    return global_verification, relevant_dates
 
 
 def _risk_metrics(
@@ -523,13 +620,15 @@ def _daily_statuses(
     snapshot: FinancialSnapshot,
     scenarios: tuple[ScenarioCashflow, ...],
     metrics: RiskMetrics,
-) -> dict[date, RiskStatus]:
+) -> tuple[dict[date, RiskStatus], dict[date, tuple[str, ...]]]:
     """Derive an aggregate user state for each day across all delay scenarios."""
 
     statuses: dict[date, RiskStatus] = {}
+    active_risk_event_ids: dict[date, tuple[str, ...]] = {}
     start_date = snapshot.as_of.date()
     accounts = {account.account_id: account for account in snapshot.accounts}
     protected = _protected_by_account(snapshot)
+    global_verification, verification_dates = _daily_verification_scope(snapshot)
     unresolved_by_scenario: dict[DelayScenario, tuple[ShortfallIncident, ...]] = {
         scenario.scenario: () for scenario in scenarios
     }
@@ -538,11 +637,10 @@ def _daily_statuses(
         incident: ShortfallIncident,
         position: DailyPosition,
     ) -> ShortfallIncident | None:
-        net_after_floors = sum(
-            position.account_balances[account_id] - protected[account_id] - account.minimum_balance
-            for account_id, account in accounts.items()
+        net_unprotected_balance = sum(
+            position.account_balances[account_id] - protected[account_id] for account_id in accounts
         )
-        total_gap = max(0, snapshot.preferences.minimum_total_reserve - net_after_floors)
+        total_gap = max(0, -net_unprotected_balance)
         if total_gap > 0:
             return incident.model_copy(
                 update={
@@ -551,12 +649,9 @@ def _daily_statuses(
                     "gap": total_gap,
                 }
             )
-        account = accounts[incident.account_id]
         account_gap = max(
             0,
-            protected[incident.account_id]
-            + account.minimum_balance
-            - position.account_balances[incident.account_id],
+            protected[incident.account_id] - position.account_balances[incident.account_id],
         )
         if account_gap > 0:
             return incident.model_copy(
@@ -570,8 +665,9 @@ def _daily_statuses(
 
     for offset in range(ANALYSIS_HORIZON_DAYS):
         current_date = start_date + timedelta(days=offset)
+        requires_daily_verification = global_verification or current_date in verification_dates
+        daily_confidence = metrics.data_confidence if requires_daily_verification else 1.0
         dated_scenarios: list[tuple[ScenarioCashflow, tuple[ShortfallIncident, ...]]] = []
-        has_carried_shortfall = False
         for scenario in scenarios:
             position = scenario.daily_positions[offset]
             carried = tuple(
@@ -582,7 +678,6 @@ def _daily_statuses(
             current = tuple(
                 incident for incident in scenario.shortfalls if incident.date == current_date
             )
-            has_carried_shortfall = has_carried_shortfall or bool(carried)
             effective = (*carried, *current)
             dated_scenarios.append((scenario, effective))
             unresolved_by_scenario[scenario.scenario] = tuple(
@@ -592,6 +687,7 @@ def _daily_statuses(
             )
         risky_scenarios = [item for item in dated_scenarios if item[1]]
         if not risky_scenarios:
+            active_risk_event_ids[current_date] = ()
             daily_metrics = RiskMetrics(
                 shortfall_probability=0,
                 payment_account_shortfall_probability=0,
@@ -601,8 +697,8 @@ def _daily_statuses(
                 expected_gap_min=0,
                 expected_gap_max=0,
                 days_until_risk=None,
-                data_confidence=metrics.data_confidence,
-                requires_verification=metrics.requires_verification,
+                data_confidence=daily_confidence,
+                requires_verification=requires_daily_verification,
             )
         else:
             incidents = [
@@ -610,6 +706,11 @@ def _daily_statuses(
                 for _, scenario_incidents in risky_scenarios
                 for incident in scenario_incidents
             ]
+            active_risk_event_ids[current_date] = tuple(
+                sorted(
+                    {incident.event_id for incident in incidents if incident.event_id is not None}
+                )
+            )
             has_total_liquidity_risk = any(
                 incident.shortfall_type == ShortfallType.TOTAL_LIQUIDITY for incident in incidents
             )
@@ -641,10 +742,10 @@ def _daily_statuses(
                 ),
                 expected_gap_min=min(incident.gap for incident in incidents),
                 expected_gap_max=max(incident.gap for incident in incidents),
-                days_until_risk=0 if has_carried_shortfall else offset,
-                data_confidence=metrics.data_confidence,
+                days_until_risk=0,
+                data_confidence=daily_confidence,
                 has_essential_risk=any(incident.is_essential for incident in incidents),
-                requires_verification=metrics.requires_verification,
+                requires_verification=requires_daily_verification,
                 triggering_event_ids=tuple(
                     sorted(
                         {
@@ -656,7 +757,7 @@ def _daily_statuses(
                 ),
             )
         statuses[current_date] = select_risk_status(daily_metrics)
-    return statuses
+    return statuses, active_risk_event_ids
 
 
 def _with_daily_statuses(
@@ -664,12 +765,24 @@ def _with_daily_statuses(
     scenarios: tuple[ScenarioCashflow, ...],
     metrics: RiskMetrics,
 ) -> tuple[ScenarioCashflow, ...]:
-    statuses = _daily_statuses(snapshot, scenarios, metrics)
+    statuses, active_risk_event_ids = _daily_statuses(snapshot, scenarios, metrics)
     return tuple(
         scenario.model_copy(
             update={
                 "daily_positions": tuple(
-                    position.model_copy(update={"status": statuses[position.date]})
+                    position.model_copy(
+                        update={
+                            "status": statuses[position.date],
+                            "triggering_event_ids": tuple(
+                                dict.fromkeys(
+                                    (
+                                        *position.triggering_event_ids,
+                                        *active_risk_event_ids[position.date],
+                                    )
+                                )
+                            ),
+                        }
+                    )
                     for position in scenario.daily_positions
                 )
             }

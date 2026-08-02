@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from flowguard.main import create_app
+from flowguard.services.reports import ReportQueryService
 from flowguard.storage import FlowGuardRepository
 
 
@@ -37,6 +40,57 @@ def _create_account(
     )
     assert response.status_code == 201
     return response.json()
+
+
+def test_weekly_timeline_aggregation_accepts_model_like_positions() -> None:
+    position = SimpleNamespace(
+        date="2026-07-24",
+        available_balance=120_000,
+        liquidity_margin=20_000,
+        payment_account_margin=-30_000,
+        status=SimpleNamespace(value="ACT_NOW"),
+        triggering_event_ids=("card-bill", "card-bill"),
+    )
+
+    weekly = ReportQueryService._weekly_positions(
+        {
+            "daily_positions": [position],
+            "scenarios": [SimpleNamespace(daily_positions=[position])],
+        },
+        margin_field="payment_account_margin",
+        event_descriptions={"card-bill": "카드 결제대금 30,000원"},
+    )
+
+    assert weekly == [
+        {
+            "week": 1,
+            "start_date": "2026-07-24",
+            "end_date": "2026-07-24",
+            "min_available_balance": 120_000,
+            "min_safety_margin": -30_000,
+            "status": "ACT_NOW",
+            "causes": ["카드 결제대금 30,000원"],
+        }
+    ]
+
+
+def test_legacy_timeline_uses_an_honest_balance_label() -> None:
+    legacy_position = {"date": "2026-07-24", "available_balance": 120_000}
+
+    contract = ReportQueryService._margin_contract(
+        {
+            "daily_positions": [legacy_position],
+            "scenarios": [{"daily_positions": [legacy_position]}],
+        },
+        shortfall_type="PAYMENT_ACCOUNT",
+    )
+
+    assert contract == (
+        "available_balance",
+        "LEGACY_AVAILABLE_BALANCE",
+        "전체 가용잔액 · 다시 분석 필요",
+        True,
+    )
 
 
 def test_preferences_are_persisted_and_used_by_dashboard(
@@ -70,8 +124,16 @@ def test_preferences_are_persisted_and_used_by_dashboard(
     assert "risk_metrics" in payload
     assert "data_quality" in payload
 
-    timeline = client.get("/api/v1/cashflow/timeline").json()
+    report_tools = client.app.state.report_service.tools
+    with patch.object(
+        report_tools,
+        "query_financial_events",
+        wraps=report_tools.query_financial_events,
+    ) as event_query:
+        timeline = client.get("/api/v1/cashflow/timeline").json()
+    event_query.assert_called_once()
     assert timeline["horizon_days"] == 91
+    assert timeline["requires_reanalysis"] is False
     valid_statuses = {"STABLE", "VERIFY", "PREPARE", "ACT_NOW"}
     assert {position["status"] for position in timeline["daily_positions"]} <= valid_statuses
     assert all(
@@ -84,6 +146,65 @@ def test_preferences_are_persisted_and_used_by_dashboard(
         "7일 지연",
         "14일 지연",
     }
+    weekly_positions = timeline["weekly_positions"]
+    assert [position["week"] for position in weekly_positions] == list(range(1, 14))
+    assert all(position["causes"] == [] for position in weekly_positions)
+    status_severity = {"STABLE": 0, "VERIFY": 1, "PREPARE": 2, "ACT_NOW": 3}
+    margin_field = (
+        "payment_account_margin"
+        if payload["risk_metrics"]["shortfall_type"] == "PAYMENT_ACCOUNT"
+        else "liquidity_margin"
+    )
+    for index, weekly in enumerate(weekly_positions):
+        scenario_week = [
+            position
+            for scenario in timeline["scenarios"]
+            for position in scenario["daily_positions"][index * 7 : (index + 1) * 7]
+        ]
+        assert weekly["start_date"] == timeline["daily_positions"][index * 7]["date"]
+        assert weekly["end_date"] == timeline["daily_positions"][(index + 1) * 7 - 1]["date"]
+        assert weekly["min_available_balance"] == min(
+            position["available_balance"] for position in scenario_week
+        )
+        assert weekly["min_safety_margin"] == min(
+            position[margin_field] for position in scenario_week
+        )
+        assert weekly["status"] == max(
+            (position["status"] for position in scenario_week),
+            key=status_severity.__getitem__,
+        )
+
+
+def test_carried_shortfall_keeps_its_cause_in_the_following_week(
+    api: tuple[TestClient, FlowGuardRepository],
+) -> None:
+    client, _ = api
+    _create_account(client, "payment", 100, payment=True)
+    event = client.post(
+        "/api/v1/scheduled-events",
+        json={
+            "event_id": "persistent-bill",
+            "event_type": "CARD_BILL",
+            "direction": "OUTFLOW",
+            "amount": 200,
+            "expected_date": "2026-07-25",
+            "account_id": "payment",
+            "certainty": "CONFIRMED",
+            "is_essential": True,
+        },
+    )
+    assert event.status_code == 201
+    analysis = client.post(
+        "/api/v1/analyses",
+        json={"as_of": "2026-07-24T09:00:00+09:00"},
+    )
+    assert analysis.status_code == 201
+
+    timeline = client.get("/api/v1/cashflow/timeline").json()
+    second_week = timeline["weekly_positions"][1]
+
+    assert second_week["status"] == "ACT_NOW"
+    assert any("카드 결제대금" in cause for cause in second_week["causes"])
 
 
 def test_wide_import_reports_counts_and_timestamp_quality_notice(

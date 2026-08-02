@@ -46,6 +46,7 @@ TRANSACTION,account-business,,,,,,,,,card-business,,,,,txn-subscription-06,2026-
 TRANSACTION,account-business,,,,,,,,,card-business,,,,,txn-camera-purchase,2026-05-15T13:00:00+09:00,OUTFLOW,1500000,업무용 카메라 구매,EQUIPMENT,카메라스토어,PURCHASE,6,purchase-camera-001,false,,,,,,,,,,,,,,,,,,,,,,,,,,
 RECEIVABLE,,,,,,,,,2026-07-24T09:00:00+09:00,,,,,,,,,900000,,,,,,,,client-b,,,,,2026-08-20,,receivable-b-next,ESTIMATED,account-business,true,CSV,,,,,,,,,,,,,,
 RECEIVABLE,,,,,,,,,2026-07-24T09:00:00+09:00,,,,,,,,,200000,,,,,,,,client-c,,,,,2026-08-20,,receivable-c-next,ESTIMATED,account-main,true,CSV,,,,,,,,,,,,,,
+RECEIVABLE,,,,,,,,,2026-07-24T09:00:00+09:00,,,,,,,,,250000,,,,,,,,client-a,,,,,2026-08-27,,receivable-a-next,CONFIRMED,account-main,true,CSV,,,,,,,,,,,,,,
 SCHEDULED_EVENT,account-business,,,,,,,,,,,,,,,,OUTFLOW,500000,,,,,,rent-202608,,,,,,,2026-08-31,,,,,,CSV,event-rent-aug,RENT,CONFIRMED,true,false,,,,,,,,,
 SCHEDULED_EVENT,account-business,,,,,,,,,,,,,,,,OUTFLOW,100000,,,,,,insurance-202609,,,,,,,2026-09-05,,,,,,CSV,event-insurance-sep,INSURANCE,CONFIRMED,true,false,,,,,,,,,
 INSTALLMENT_PLAN,,,,,,,,,,card-business,,,,,,,,,,,,,,,,,,,,,,,,ACTIVE,,,,,,,,,installment-camera,1500000,250000,6,4,2026-08-25,,,

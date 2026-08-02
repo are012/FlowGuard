@@ -4,7 +4,7 @@ import path from "node:path";
 import type { AnalysisStatus, InterpretationStatus } from "../src/lib/types";
 
 const API_URL = "http://127.0.0.1:8100";
-const DEMO_AS_OF = "2026-07-24T09:00:00+09:00";
+const DEMO_AS_OF = "2026-07-31T09:00:00+09:00";
 const SAMPLE_CSV = path.resolve(
   __dirname,
   "../public/samples/flowguard-synthetic-transactions.csv",
@@ -116,7 +116,14 @@ test("sample data completes the safe virtual recommendation demo", async ({
   expect(dashboard.refresh_status).toBe("SUCCEEDED");
   expect(dashboard.interpretation?.source).toBe("DETERMINISTIC_FALLBACK");
 
-  await page.locator('a[href="/recommendations"]').first().click();
+  await page.goto("/cashflow");
+  await expect(page.getByText("결제계좌 안전여유", { exact: false }).first()).toBeVisible();
+  await expect(page.getByText("안전기준 미달", { exact: true })).toBeVisible();
+  await expect(page.getByText("-250,000원", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/월세 500,000원이/).first()).toBeVisible();
+  await expect(page.getByText("예정된 주요 위험 없음").first()).toBeVisible();
+
+  await page.goto("/recommendations");
   await expect(page).toHaveURL(/\/recommendations$/);
 
   const comparison = page.getByTestId("recommendation-comparison");

@@ -254,7 +254,7 @@ def test_scenario_3_total_liquidity_shortfall_rejects_protected_fund_transfer() 
 def test_daily_status_remains_urgent_until_a_shortfall_is_recovered() -> None:
     shortfall_date = date(2026, 8, 18)
     liquidity_recovery_date = date(2026, 8, 20)
-    account_recovery_date = date(2026, 8, 22)
+    account_recovery_date = date(2026, 8, 26)
     persistent_shortfall = snapshot(
         accounts=[account("payment", 100, payment=True), account("savings", 0)],
         scheduled_events=[
@@ -295,9 +295,96 @@ def test_daily_status_remains_urgent_until_a_shortfall_is_recovered() -> None:
     assert positions[shortfall_date].available_balance == 0
     assert positions[shortfall_date].status == RiskStatus.ACT_NOW
     assert positions[date(2026, 8, 19)].status == RiskStatus.ACT_NOW
+    assert positions[date(2026, 8, 19)].triggering_event_ids == ("essential-payment",)
     assert positions[liquidity_recovery_date].total_balance == 100
     assert positions[liquidity_recovery_date].status == RiskStatus.ACT_NOW
+    assert positions[date(2026, 8, 24)].status == RiskStatus.ACT_NOW
+    assert positions[date(2026, 8, 24)].triggering_event_ids == ("essential-payment",)
     assert positions[account_recovery_date].status == RiskStatus.STABLE
+
+
+def test_minimum_balance_breach_does_not_create_a_permanent_alert() -> None:
+    shortfall_date = date(2026, 8, 18)
+    reserve_breach = snapshot(
+        accounts=[account("payment", 200, minimum_balance=100, payment=True)],
+        scheduled_events=[
+            event(
+                "essential-payment",
+                EventType.RENT,
+                Direction.OUTFLOW,
+                150,
+                shortfall_date,
+                "payment",
+                essential=True,
+            )
+        ],
+    )
+
+    positions = {
+        position.date: position for position in simulate_cashflow(reserve_breach).daily_positions
+    }
+
+    assert positions[shortfall_date].available_balance == 0
+    assert positions[shortfall_date].payment_account_margin == -50
+    assert positions[shortfall_date].status == RiskStatus.ACT_NOW
+    assert positions[date(2026, 8, 19)].status == RiskStatus.STABLE
+
+
+def test_outflows_outside_the_horizon_do_not_change_payment_account_margin() -> None:
+    outside_horizon = snapshot(
+        accounts=[
+            account("payment", 500, payment=True),
+            account("future-expense", 0, minimum_balance=100),
+        ],
+        scheduled_events=[
+            event(
+                "next-year-expense",
+                EventType.OTHER_OUTFLOW,
+                Direction.OUTFLOW,
+                1,
+                date(2027, 8, 17),
+                "future-expense",
+            )
+        ],
+    )
+
+    first_position = simulate_cashflow(outside_horizon).daily_positions[0]
+
+    assert first_position.payment_account_margin == 500
+    assert first_position.status == RiskStatus.STABLE
+
+
+def test_received_or_cancelled_receivables_do_not_create_verification_days() -> None:
+    old_update = datetime(2026, 1, 1, 9, tzinfo=ZoneInfo("Asia/Seoul"))
+    inactive_receivables = snapshot(
+        accounts=[account("payment", 500, payment=True)],
+        receivables=[
+            Receivable(
+                receivable_id="already-received",
+                counterparty_id="client-1",
+                amount=100,
+                expected_date=date(2026, 8, 20),
+                status=ReceivableStatus.RECEIVED,
+                destination_account_id="payment",
+                user_confirmed=False,
+                updated_at=old_update,
+            ),
+            Receivable(
+                receivable_id="cancelled",
+                counterparty_id="client-2",
+                amount=100,
+                expected_date=date(2026, 8, 21),
+                status=ReceivableStatus.CANCELLED,
+                destination_account_id="payment",
+                user_confirmed=False,
+                updated_at=old_update,
+            ),
+        ],
+    )
+
+    analysis = simulate_cashflow(inactive_receivables)
+
+    assert {position.status for position in analysis.daily_positions} == {RiskStatus.STABLE}
 
 
 def test_scenario_4_delayed_receivable_exposes_card_risk_and_evidence() -> None:

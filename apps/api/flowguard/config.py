@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 FINANCIAL_CORE_VERSION = "financial-core-1"
-CASHFLOW_TOOL_VERSION = "cashflow-1"
+CASHFLOW_TOOL_VERSION = "cashflow-2"
 SAFE_TO_SPEND_TOOL_VERSION = "safe-to-spend-1"
 ACTION_EVALUATOR_TOOL_VERSION = "action-evaluator-1"
 POLICY_VERSION = "policy-1"
 DELAY_MODEL_VERSION = "receivable-delay-fixed-v1"
-RISK_RULE_VERSION = "risk-presentation-rules-v1"
+RISK_RULE_VERSION = "risk-presentation-rules-v2"
 
 ANALYSIS_HORIZON_DAYS = 91
 DEFAULT_SIMULATION_SEED = 42
 DEFAULT_PROTECTION_LEVEL = 0.90
-DEMO_ANALYSIS_AS_OF = "2026-07-24T09:00:00+09:00"
+DEMO_ANALYSIS_AS_OF = "2026-07-31T09:00:00+09:00"
 
 AI_SCHEMA_VERSION = "1.1"
 AI_CONTRACT_VERSION = "1.1"

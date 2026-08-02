@@ -605,6 +605,26 @@ Deterministic Financial Core는 다음 값을 계산한다.
 전체 총자산 변화 없음
 ```
 
+일별 위치는 표시용 잔액과 위험 판정용 안전여유를 구분한다.
+
+```text
+liquidity_margin
+=
+모든 계좌의 (잔액 - 보호자금 - 계좌별 최소잔액) 합계
+- 최소 총예비비
+
+available_balance = max(0, liquidity_margin)
+
+payment_account_margin
+=
+결제계좌별 (잔액 - 보호자금 - 계좌별 최소잔액) 중 최솟값
+```
+
+`liquidity_margin`과 `payment_account_margin`은 안전기준 미달을 표현할 수 있도록
+음수를 허용한다. 결제계좌에는 결제계좌로 등록된 계좌, 카드 결제계좌와 분석
+기간에 유출이 예정된 계좌가 포함된다. 해당 계좌가 없으면 전체 계좌의
+안전여유를 사용한다.
+
 ## 8.3 이벤트 처리 순서
 
 같은 날짜에 여러 이벤트가 있을 때의 기본 순서:
@@ -635,6 +655,8 @@ Deterministic Financial Core는 다음 값을 계산한다.
       },
       "total_balance": 1000000,
       "available_balance": 0,
+      "liquidity_margin": 0,
+      "payment_account_margin": -220000,
       "protected_balance": 1000000,
       "status": "ACT_NOW",
       "triggering_event_ids": ["event-card-bill-001"]
@@ -644,8 +666,14 @@ Deterministic Financial Core는 다음 값을 계산한다.
 ```
 
 `daily_positions[].status`는 네 가지 지연 시나리오의 해당 날짜 부족 가능성과
-이전에 발생해 일별 잔액·보호 기준상 아직 해소되지 않은 부족, 필수지출 여부,
-임박도, 데이터 확인 상태를 금융 백엔드가 13.3의 규칙으로 판정한 값이다.
+이전에 발생해 실제 비보호 잔액 적자가 아직 해소되지 않은 부족, 필수지출 여부,
+임박도와 날짜별 데이터 확인 범위를 금융 백엔드가 13.3의 규칙으로 판정한 값이다.
+최소잔액이나 최소 총예비비 미달만으로 발생한 부족은 결제일 이후까지 영구
+전파하지 않는다. 계좌 부족은 해당 계좌의 `잔액 - 보호자금`이, 전체 유동성
+부족은 모든 계좌의 `잔액 - 보호자금` 합계가 0 이상으로 회복될 때 전파를 끝낸다.
+최초 부족 판정에는 설정된 최소잔액과 최소 총예비비를 그대로 적용한다.
+`triggering_event_ids`에는 해당 날짜에 발생한 이벤트뿐 아니라 아직 해소되지 않은
+실제 적자의 원인 이벤트도 포함해 후속 주차에서 원인을 잃지 않도록 한다.
 클라이언트는 잔액만 보고 별도의 위험 상태를 만들지 않는다.
 
 ---
@@ -869,15 +897,33 @@ ACT_NOW
 
 ## 13.3 판정 규칙
 
-정확한 임곗값은 `TBD`다.
+현재 구현은 `risk-presentation-rules-v2`의 명시적 규칙을 사용한다.
 
-초기 구현은 명시적 규칙 기반으로 작성한다.
+위험일이 있는 경우:
+
+- `ACT_NOW`: 위험일까지 3일 이내이고 (`부족확률 >= 0.75` 또는 필수결제 영향)임
+- `PREPARE`: 부족확률이 0.25 이상이거나 위험일까지 14일 이내임
+- `VERIFY`: 위험은 있으나 위 조건에 해당하지 않음
+
+여러 조건을 동시에 만족하면 위 목록의 높은 상태를 우선한다.
+
+위험일이 없는 경우:
+
+- 전체 Risk Presentation은 확인이 필요한 데이터가 있거나 데이터 신뢰도가
+  0.60 미만이면 `VERIFY`, 그렇지 않으면 `STABLE`로 판정한다.
+- 일별 상태에서 누락되거나 오래된 데이터 원천이 있으면 전체 91일에
+  `VERIFY` 조건을 적용한다. 이미 `RECEIVED` 또는 `CANCELLED`인 채권의 최신성은
+  미래 현금흐름과 무관하므로 이 조건에서 제외한다.
+- 일별 상태에서 미확인 예정수입은 예정일부터 최대 지연 시나리오인 14일
+  뒤까지, `ESTIMATED` 예정 이벤트는 해당 예정일에만 `VERIFY` 조건을 적용한다.
+- 일별 확인 범위 밖이고 다른 위험이 없으면 `STABLE`로 판정한다.
 
 필수 원칙:
 
-- 데이터 부족만으로 `STABLE`을 반환하지 않는다.
+- 해당 날짜에 적용되는 데이터 부족만으로 `STABLE`을 반환하지 않는다.
 - 위험확률이 낮더라도 위험일이 임박하고 필수결제 영향이 크면 높은 상태를 선택할 수 있다.
-- 데이터 신뢰도가 낮은 경우 `VERIFY`를 우선할 수 있다.
+- 날짜가 한정된 불확실성을 위험과 무관한 전체 기간의 경보로 확장하지 않는다.
+- 최소잔액 또는 최소 총예비비 미달만으로 지난 부족을 `ACT_NOW`로 계속 전파하지 않는다.
 - 사용자 화면에는 내부 확률을 기본 정보로 노출하지 않는다.
 - 내부 확률은 평가, 비교, 알림 기준, 감사 로그에 유지한다.
 
@@ -891,7 +937,8 @@ ACT_NOW
   "impact": "약 8만~15만 원이 부족할 수 있습니다",
   "cause": "거래처 B의 입금 일정이 불확실합니다",
   "recommended_action": "결제계좌에 10만 원을 미리 확보하세요",
-  "confidence_label": "분석 신뢰도 보통"
+  "confidence_label": "분석 신뢰도 보통",
+  "rule_version": "risk-presentation-rules-v2"
 }
 ```
 
@@ -1531,7 +1578,7 @@ confirm_receivable
   "snapshot_id": "snapshot-001",
   "daily_positions": [],
   "risk_metrics": {},
-  "tool_version": "cashflow-1"
+  "tool_version": "cashflow-2"
 }
 ```
 
@@ -1656,6 +1703,79 @@ GET /api/v1/risks/next
 GET /api/v1/receivables
 GET /api/v1/installments
 ```
+
+`GET /api/v1/cashflow/timeline`은 금융 코어 결과를 화면용 읽기 모델로 변환해
+반환한다.
+
+```json
+{
+  "analysis_id": "analysis-001",
+  "snapshot_id": "snapshot-001",
+  "as_of": "2026-08-24T09:00:00+09:00",
+  "analysis_horizon_days": 91,
+  "horizon_days": 91,
+  "balance_basis": "PAYMENT_ACCOUNT",
+  "balance_basis_label": "결제계좌 안전여유",
+  "requires_reanalysis": false,
+  "daily_positions": [
+    {
+      "date": "2026-08-25",
+      "available_balance": 850000,
+      "liquidity_margin": 850000,
+      "payment_account_margin": -120000,
+      "safety_margin": -120000,
+      "worst_case_safety_margin": -250000,
+      "status": "ACT_NOW",
+      "triggering_event_ids": ["event-card-bill-001"]
+    }
+  ],
+  "weekly_positions": [
+    {
+      "week": 1,
+      "start_date": "2026-08-24",
+      "end_date": "2026-08-30",
+      "min_available_balance": 850000,
+      "min_safety_margin": -250000,
+      "status": "ACT_NOW",
+      "causes": ["생활비 카드 결제대금 950,000원이 생활비 결제계좌에서 출금될 예정입니다."]
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario": "ON_TIME",
+      "scenario_label": "기준",
+      "daily_positions": [],
+      "shortfalls": []
+    }
+  ],
+  "is_virtual": false
+}
+```
+
+위 예시는 필드 구조를 보여주기 위해 `daily_positions`, `weekly_positions`와
+`scenarios` 배열의 나머지 항목을 생략했다. 실제 응답의 지연 시나리오는 9.1의
+네 가지 시나리오를 모두 포함한다.
+
+- 최상위 위험 유형이 `PAYMENT_ACCOUNT`이면 `payment_account_margin`을 선택해
+  `balance_basis="PAYMENT_ACCOUNT"`, `balance_basis_label="결제계좌 안전여유"`로
+  반환한다. 그 외에는 `liquidity_margin`을 선택해
+  `balance_basis="TOTAL_LIQUIDITY"`, `balance_basis_label="전체 유동성 안전여유"`로
+  반환한다.
+- `daily_positions[].safety_margin`은 기준 시나리오의 선택된 부호 있는 여유액이다.
+- `daily_positions[].worst_case_safety_margin`은 같은 날짜의 네 가지 지연
+  시나리오 중 가장 작은 선택 여유액이다.
+- `weekly_positions`는 91일을 7일씩 묶은 13개 항목이다. 각 항목의
+  `min_available_balance`와 `min_safety_margin`은 해당 주와 모든 시나리오의
+  각 필드 최솟값이며, `status`는 `STABLE < VERIFY < PREPARE < ACT_NOW`
+  순서에서 가장 높은 상태다.
+- `weekly_positions[].causes`는 해당 주의 `triggering_event_ids`에 연결된
+  결정적 이벤트 설명이며 원인이 없으면 빈 배열이다.
+- 이전 버전의 저장 리포트처럼 부호 있는 여유액이 없으면
+  `balance_basis="LEGACY_AVAILABLE_BALANCE"`,
+  `balance_basis_label="전체 가용잔액 · 다시 분석 필요"`,
+  `requires_reanalysis=true`를 반환한다. 이 경우 결제계좌 안전여유라고 오표시하지
+  않고 `available_balance`만 호환 표시한다.
+- 클라이언트는 이 읽기 모델의 안전여유, 주차 상태와 원인을 재계산하지 않는다.
 
 ## 21.4 추천안
 
@@ -1988,15 +2108,13 @@ MVP 핵심 구현은 다음 조건을 충족해야 한다.
 1. 거래처 지급 이력이 충분하다고 보는 최소 표본 수
 2. 예정 수입 지연 확률 산출 방식
 3. 거래처별 분포와 전체 기본 분포의 결합 방식
-4. Risk Presentation 상태별 정확한 임곗값
-5. 반동위험의 정량 임곗값
-6. Safe-to-Spend 보호수준의 운영 기본값
-7. 보호수준을 사용자 화면에 직접 노출할지 여부
-8. 신규 할부 수수료 반영 방식
-9. 선택지출 예상액 산출 방식
-10. 5~13주 구간의 사용자 표시 단위
-11. 분석 실행 제한시간과 재시도 정책
-12. 알림 중복 억제 기간
-13. 실제 저장소에서 사용할 ID 형식
-14. CSV 표준 컬럼과 샘플 데이터 형식
-15. 운영 환경의 Docker 사용 여부와 배포 방식
+4. 반동위험의 정량 임곗값
+5. Safe-to-Spend 보호수준의 운영 기본값
+6. 보호수준을 사용자 화면에 직접 노출할지 여부
+7. 신규 할부 수수료 반영 방식
+8. 선택지출 예상액 산출 방식
+9. 분석 실행 제한시간과 재시도 정책
+10. 알림 중복 억제 기간
+11. 실제 저장소에서 사용할 ID 형식
+12. CSV 표준 컬럼과 샘플 데이터 형식
+13. 운영 환경의 Docker 사용 여부와 배포 방식

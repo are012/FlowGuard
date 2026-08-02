@@ -41,8 +41,9 @@ def select_risk_status(metrics: RiskMetrics) -> RiskStatus:
         return RiskStatus.STABLE
 
     days = metrics.days_until_risk if metrics.days_until_risk is not None else 0
-    if metrics.shortfall_probability >= RISK_ACT_NOW_PROBABILITY_THRESHOLD or (
-        metrics.has_essential_risk and days <= RISK_ACT_NOW_DAYS_THRESHOLD
+    if days <= RISK_ACT_NOW_DAYS_THRESHOLD and (
+        metrics.shortfall_probability >= RISK_ACT_NOW_PROBABILITY_THRESHOLD
+        or metrics.has_essential_risk
     ):
         return RiskStatus.ACT_NOW
     if (

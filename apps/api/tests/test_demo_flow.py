@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -42,7 +43,7 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
             "counterparties": 3,
             "payment_histories": 14,
             "scheduled_events": 2,
-            "receivables": 2,
+            "receivables": 3,
             "installment_plans": 1,
             "protected_funds": 1,
             "candidates": 5,
@@ -53,7 +54,7 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
             headers=headers,
             json={
                 "trigger_type": "DATA_REFRESH",
-                "as_of": "2026-07-24T09:00:00+09:00",
+                "as_of": "2026-07-31T09:00:00+09:00",
             },
         )
         assert analysis.status_code == 201
@@ -62,7 +63,7 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         dashboard = client.get("/api/v1/dashboard", headers=headers)
         assert dashboard.status_code == 200
         dashboard_payload = dashboard.json()
-        assert dashboard_payload["safe_to_spend"]["safe_to_spend"] == 100_000
+        assert dashboard_payload["safe_to_spend"]["safe_to_spend"] == 350_000
         assert dashboard_payload["risk_metrics"]["shortfall_type"] == "PAYMENT_ACCOUNT"
         assert dashboard_payload["risk_metrics"]["expected_gap_min"] == 50_000
         assert dashboard_payload["risk_metrics"]["expected_gap_max"] == 250_000
@@ -73,6 +74,7 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         assert dashboard_payload["presentation"]["confidence_label"] == (
             "예정 수입을 확인할수록 분석이 정밀해져요"
         )
+        assert dashboard_payload["presentation"]["status"] == "PREPARE"
         primary_evidence = CoreToolService(repository).get_counterparty_evidence(
             dashboard_payload["snapshot_id"], "client-a"
         )
@@ -92,17 +94,81 @@ def test_sample_csv_runs_the_complete_virtual_recommendation_flow() -> None:
         timeline = client.get("/api/v1/cashflow/timeline", headers=headers).json()
         valid_statuses = {"STABLE", "VERIFY", "PREPARE", "ACT_NOW"}
         assert {position["status"] for position in timeline["daily_positions"]} <= valid_statuses
+        status_counts = Counter(position["status"] for position in timeline["daily_positions"])
+        assert status_counts == {"STABLE": 76, "VERIFY": 13, "ACT_NOW": 2}
+        assert [
+            position["date"]
+            for position in timeline["daily_positions"]
+            if position["status"] == "ACT_NOW"
+        ] == ["2026-08-25", "2026-08-26"]
+        assert timeline["balance_basis"] == "PAYMENT_ACCOUNT"
+        assert timeline["balance_basis_label"] == "결제계좌 안전여유"
+        first_four_weeks = timeline["daily_positions"][:28]
+        assert (
+            min(position["worst_case_safety_margin"] for position in first_four_weeks) == -250_000
+        )
+        assert len({position["worst_case_safety_margin"] for position in first_four_weeks}) > 1
+        assert len(timeline["weekly_positions"]) == 13
+        assert all(
+            weekly["causes"]
+            for weekly in timeline["weekly_positions"]
+            if weekly["status"] in {"PREPARE", "ACT_NOW"}
+        )
         risk_position = next(
             position
             for position in timeline["daily_positions"]
             if position["date"] == dashboard_payload["risk_metrics"]["first_risk_date"]
         )
         assert risk_position["status"] == "ACT_NOW"
+        weekly_positions = timeline["weekly_positions"]
+        assert [position["week"] for position in weekly_positions] == list(range(1, 14))
+        risk_week = next(
+            position
+            for position in weekly_positions
+            if position["start_date"]
+            <= dashboard_payload["risk_metrics"]["first_risk_date"]
+            <= position["end_date"]
+        )
+        assert risk_week["status"] == "ACT_NOW"
+        assert len(risk_week["causes"]) == len(set(risk_week["causes"]))
+        assert any("생활비 카드 결제대금" in cause for cause in risk_week["causes"][:2])
+        assert any("사업용 카드 할부금" in cause for cause in risk_week["causes"][:2])
+        risk_week_index = risk_week["week"] - 1
+        scenario_week = [
+            position
+            for scenario in timeline["scenarios"]
+            for position in scenario["daily_positions"][
+                risk_week_index * 7 : (risk_week_index + 1) * 7
+            ]
+        ]
+        assert risk_week["min_available_balance"] == min(
+            position["available_balance"] for position in scenario_week
+        )
+        margin_field = (
+            "payment_account_margin"
+            if dashboard_payload["risk_metrics"]["shortfall_type"] == "PAYMENT_ACCOUNT"
+            else "liquidity_margin"
+        )
+        scenario_margins = []
+        for position in scenario_week:
+            if margin_field in position:
+                scenario_margins.append(position[margin_field])
+        if scenario_margins:
+            assert risk_week["min_safety_margin"] == min(scenario_margins)
+        else:
+            assert risk_week["min_safety_margin"] is None
 
         receivables = {
             item["receivable_id"]: item
             for item in client.get("/api/v1/receivables", headers=headers).json()
         }
+        assert set(receivables) == {
+            "receivable-a-next",
+            "receivable-b-next",
+            "receivable-c-next",
+        }
+        assert receivables["receivable-a-next"]["counterparty_name"] == "디자인컴퍼니A"
+        assert receivables["receivable-a-next"]["status"] == "CONFIRMED"
         assert receivables["receivable-b-next"]["counterparty_name"] == "콘텐츠랩B"
         delayed_evidence = receivables["receivable-b-next"]["counterparty_evidence"]
         assert delayed_evidence["payment_history_count"] == 4
