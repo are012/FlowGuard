@@ -628,3 +628,33 @@
     gap: 11px;
   }
 }
+
+/* 변동 없는 연속 구간을 한 줄로 접은 행 */
+.cashflow-row.is-quiet-row {
+  background: var(--surface-soft);
+  color: var(--ink-muted);
+}
+
+.cashflow-row.is-quiet-row strong {
+  color: var(--ink-muted);
+  font-weight: 600;
+}
+
+.cashflow-row.is-quiet-row span[aria-hidden="true"] {
+  color: var(--line-strong);
+}
+
+/* 주의가 필요 없는 주차는 한 줄 요약으로 접는다 */
+.week-card.is-quiet-week {
+  background: var(--surface-soft);
+  border-color: var(--line);
+  box-shadow: none;
+  min-height: 0;
+  padding: 14px 16px;
+}
+
+.week-card.is-quiet-week > p {
+  color: var(--ink-muted);
+  font-size: 10px;
+  margin: 8px 0 0;
+}

@@ -24,9 +24,44 @@ import {
 } from "@/lib/format";
 import type {
   ActionDefinition,
+  DashboardResponse,
   Recommendation,
   RecommendationComparisonCandidate,
 } from "@/lib/types";
+
+/**
+ * 추천 목록이 비어 있는 이유는 세 가지다. 홈 화면이 위험을 경고하는데
+ * 이 화면이 "안전한 상태"라고 답하면 사용자가 모순을 만나므로,
+ * 위험 상태와 부족 유형에 따라 설명을 나눈다.
+ */
+function emptyReason(dashboard?: DashboardResponse) {
+  const status = dashboard?.presentation?.status;
+  const shortfallType = dashboard?.risk_metrics?.shortfall_type;
+  const suggested = dashboard?.presentation?.recommended_action;
+
+  if (!status || status === "STABLE") {
+    return {
+      title: "지금은 준비할 행동이 없어요",
+      description:
+        "가까운 결제 위험이 확인되지 않았습니다. 금융정보가 바뀌면 다시 확인해 드릴게요.",
+      hint: undefined,
+    };
+  }
+  if (shortfallType === "TOTAL_LIQUIDITY") {
+    return {
+      title: "계좌 이동만으로는 해결하기 어려워요",
+      description:
+        "가용 계좌의 돈을 모두 합쳐도 필수지출을 충당하기 어려운 상태라, 자금을 옮기는 방법으로는 위험이 줄지 않습니다.",
+      hint: suggested || "이번 주 선택지출 조정과 거래처 지급 확인이 필요합니다.",
+    };
+  }
+  return {
+    title: "안전 기준을 통과한 방법을 찾지 못했어요",
+    description:
+      "검토한 대응안이 금융 안전정책 검증이나 13주 재검증을 통과하지 못했습니다. 보호자금과 필수생활비를 지키기 위해 추천으로 확정하지 않았습니다.",
+    hint: suggested,
+  };
+}
 
 type RecommendationsResponse =
   | Recommendation[]
@@ -138,6 +173,7 @@ function comparisonViews(items: Recommendation[]): RecommendationView[] {
 export default function RecommendationsPage() {
   const { data, error, loading, reload } =
     useRemote<RecommendationsResponse>("/api/v1/recommendations");
+  const { data: dashboard } = useRemote<DashboardResponse>("/api/v1/dashboard");
   const [selectedKey, setSelectedKey] = useState<string>();
   const [busyAction, setBusyAction] = useState<string>();
   const [actionError, setActionError] = useState<string>();
@@ -235,14 +271,16 @@ export default function RecommendationsPage() {
   }
   if (error && !data) return <ErrorState error={error} onRetry={reload} />;
   if (!views.length || !selected || !selectedView) {
+    const reason = emptyReason(dashboard);
     return (
       <EmptyState
         icon="recommendations"
-        title="현재 제안할 대응안이 없어요"
-        description="안전한 상태이거나 분석 결과에 추천안이 아직 생성되지 않았습니다."
+        title={reason.title}
+        description={reason.description}
+        hint={reason.hint}
         action={
           <Link className="button button-secondary" href="/risk">
-            위험 상태 확인
+            위험 근거 확인
           </Link>
         }
       />

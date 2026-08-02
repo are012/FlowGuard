@@ -98,11 +98,14 @@ export function EmptyState({
   icon = "info",
   title,
   description,
+  hint,
   action,
 }: {
   icon?: IconName;
   title: string;
   description: string;
+  /** 비어 있는 이유만으로 부족할 때, 사용자가 다음에 할 일을 덧붙인다. */
+  hint?: string;
   action?: ReactNode;
 }) {
   return (
@@ -113,6 +116,12 @@ export function EmptyState({
       <div>
         <strong>{title}</strong>
         <p>{description}</p>
+        {hint && (
+          <p className="empty-hint">
+            <Icon name="arrow" size={15} />
+            {hint}
+          </p>
+        )}
       </div>
       {action}
     </div>

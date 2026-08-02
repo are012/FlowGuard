@@ -73,6 +73,56 @@ function scenarioName(scenario: NonNullable<TimelineResponse["scenarios"]>[numbe
   return raw ? labels[raw] || raw : "이름 정보 없음";
 }
 
+type DayRow =
+  | { kind: "day"; position: DailyPosition; index: number }
+  | { kind: "quiet"; from: string; to: string; days: number };
+
+/**
+ * 변동 없는 날이 연달아 이어지면 표가 같은 값으로 채워져 스크롤만 길어진다.
+ * 이벤트가 있거나 상태가 바뀌거나 위험일인 날만 남기고 나머지는 한 줄로 묶는다.
+ */
+function collapseQuietDays(
+  positions: DailyPosition[],
+  riskDate?: string,
+): DayRow[] {
+  const rows: DayRow[] = [];
+  let quiet: DailyPosition[] = [];
+
+  const flush = () => {
+    if (!quiet.length) return;
+    if (quiet.length <= 2) {
+      quiet.forEach((position) =>
+        rows.push({ kind: "day", position, index: positions.indexOf(position) }),
+      );
+    } else {
+      rows.push({
+        kind: "quiet",
+        from: quiet[0].date,
+        to: quiet[quiet.length - 1].date,
+        days: quiet.length,
+      });
+    }
+    quiet = [];
+  };
+
+  positions.forEach((position, index) => {
+    const hasEvent = Boolean(position.triggering_event_ids?.length);
+    const isRisk = Boolean(riskDate) && position.date === riskDate;
+    const statusChanged =
+      index > 0 && position.status !== positions[index - 1].status;
+    const isEdge = index === 0 || index === positions.length - 1;
+
+    if (hasEvent || isRisk || statusChanged || isEdge) {
+      flush();
+      rows.push({ kind: "day", position, index });
+    } else {
+      quiet.push(position);
+    }
+  });
+  flush();
+  return rows;
+}
+
 export default function CashflowPage() {
   const { data, error, loading, reload } =
     useRemote<TimelineResponse>("/api/v1/cashflow/timeline");
@@ -398,7 +448,24 @@ export default function CashflowPage() {
             <span>상태</span>
           </div>
           <div className="cashflow-table-body">
-            {firstFourWeeks.map((position: DailyPosition, index) => {
+            {collapseQuietDays(firstFourWeeks, riskDate).map((row) => {
+              if (row.kind === "quiet") {
+                return (
+                  <div
+                    className="cashflow-row is-quiet-row"
+                    key={`quiet-${row.from}-${row.to}`}
+                  >
+                    <strong>
+                      {formatShortDate(row.from)} – {formatShortDate(row.to)}
+                    </strong>
+                    <span>{row.days}일 동안 변동 없음</span>
+                    <span aria-hidden="true">·</span>
+                    <span aria-hidden="true">·</span>
+                    <span aria-hidden="true">·</span>
+                  </div>
+                );
+              }
+              const { position, index } = row;
               const margin = worstCaseSafetyMargin(position);
               return (
                 <div
@@ -455,6 +522,29 @@ export default function CashflowPage() {
                 status === "STABLE" && !holdsRisk
                   ? "예정된 주요 위험 없음"
                   : "원인 확인 필요";
+              // 안정 구간까지 모두 펼치면 모바일에서 카드가 9개 넘게 쌓인다.
+              // 주의가 필요한 주차만 펼치고 나머지는 한 줄 요약으로 접는다.
+              const isQuietWeek = status === "STABLE" && !holdsRisk;
+              if (isQuietWeek) {
+                return (
+                  <article
+                    className="week-card is-quiet-week"
+                    key={`${week}-${position.start_date || index}`}
+                  >
+                    <div className="week-card-top">
+                      <span>{week}주 차</span>
+                      <StatusPill status={position.status} />
+                    </div>
+                    <p>
+                      {formatShortDate(position.start_date)} –{" "}
+                      {formatShortDate(position.end_date)}
+                      {typeof margin === "number"
+                        ? ` · 최소 ${formatCompactWon(margin)}`
+                        : ""}
+                    </p>
+                  </article>
+                );
+              }
               return (
                 <article
                   className={`week-card week-${status?.toLowerCase() || "unknown"}${

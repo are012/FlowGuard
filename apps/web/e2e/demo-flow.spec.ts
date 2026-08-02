@@ -121,7 +121,13 @@ test("sample data completes the safe virtual recommendation demo", async ({
   await expect(page.getByText("안전기준 미달", { exact: true })).toBeVisible();
   await expect(page.getByText("-250,000원", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/월세 500,000원이/).first()).toBeVisible();
-  await expect(page.getByText("예정된 주요 위험 없음").first()).toBeVisible();
+  // 안정 구간은 카드를 펼치지 않고 상태와 최소 안전여유만 요약해 접는다.
+  await expect(page.locator(".week-card.is-quiet-week").first()).toBeVisible();
+  await expect(
+    page.locator(".week-card.is-quiet-week").first().getByText("현재는 안전해요"),
+  ).toBeVisible();
+  // 변동 없는 날이 이어지는 구간은 한 줄로 접힌다.
+  await expect(page.locator(".cashflow-row.is-quiet-row").first()).toBeVisible();
 
   await page.goto("/recommendations");
   await expect(page).toHaveURL(/\/recommendations$/);
