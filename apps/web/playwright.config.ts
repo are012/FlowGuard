@@ -60,6 +60,10 @@ export default defineConfig({
         DATABASE_URL: databaseUrl,
         FLOWGUARD_AUTO_CREATE_SCHEMA: "true",
         FLOWGUARD_AI_SERVER_URL: "http://127.0.0.1:1",
+        // 브라우저 시나리오는 결정론 경로와 동기 응답을 검증한다.
+        // 프로덕션 기본값(비동기 + AI 조사)은 별도 실측으로 확인한다.
+        FLOWGUARD_AI_INVESTIGATION: "off",
+        FLOWGUARD_ANALYSIS_ASYNC: "off",
         FLOWGUARD_CORS_ORIGINS: WEB_URL,
         FLOWGUARD_DEMO_USER_ID: "e2e-user",
       },

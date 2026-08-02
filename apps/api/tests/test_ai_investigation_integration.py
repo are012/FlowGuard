@@ -286,10 +286,16 @@ def _numeric_date_signature(
     return ()
 
 
-def test_unset_mode_preserves_the_deterministic_analysis_and_interpret_contract(
+def test_off_mode_preserves_the_deterministic_analysis_and_interpret_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("FLOWGUARD_AI_INVESTIGATION", raising=False)
+    """off 로 끄면 조사 도입 이전과 완전히 동일한 계약을 유지해야 한다.
+
+    프로덕션 기본값이 on 으로 바뀐 뒤에도 이 보장은 그대로다.
+    조사를 끄는 것이 언제나 안전한 되돌리기 수단이어야 하기 때문이다.
+    """
+
+    monkeypatch.setenv("FLOWGUARD_AI_INVESTIGATION", "off")
     monkeypatch.setenv("FLOWGUARD_AI_CLASSIFICATION", "off")
     repository = FlowGuardRepository("sqlite:///:memory:")
     interpretation_client = InterpretationStub()

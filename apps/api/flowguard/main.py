@@ -172,7 +172,7 @@ def _classification_mode() -> ClassificationMode:
 
 
 def _investigation_mode() -> InvestigationMode:
-    configured = os.getenv("FLOWGUARD_AI_INVESTIGATION", "off").strip().lower()
+    configured = os.getenv("FLOWGUARD_AI_INVESTIGATION", "on").strip().lower()
     if configured in {"shadow", "on"}:
         return configured
     if configured not in {"", "off"}:

@@ -426,7 +426,7 @@ def analysis_runs_in_background() -> bool:
     진행 상황을 확인한다. 기본값은 기존 동기 동작이다.
     """
 
-    return os.getenv("FLOWGUARD_ANALYSIS_ASYNC", "off").strip().lower() in {
+    return os.getenv("FLOWGUARD_ANALYSIS_ASYNC", "on").strip().lower() in {
         "1",
         "on",
         "true",
