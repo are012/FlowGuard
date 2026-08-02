@@ -20,7 +20,7 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 |---|---|---|
 | Web | Next.js 프로세스 | `flowguard-web` 컨테이너 |
 | API/분석 | FastAPI 요청 안에서 동기 분석 | API와 durable worker 분리 |
-| AI 분류·해석 | 같은 Python distribution의 별도 FastAPI 진입점, 단일 worker | 공유 멱등 저장소 기반 다중 worker 서비스 |
+| AI 분류·조사·해석 | 같은 Python distribution의 별도 FastAPI 진입점, 단일 worker | 공유 멱등 저장소 기반 다중 worker 서비스 |
 | 코어/MCP 도구 | 일곱 도구와 FastMCP 진입점 구현; 분석 경로는 동일 구현을 in-process 호출 | 별도 MCP 프로세스와 transport |
 | 저장소 | Alembic 버전 관리 SQLite·마이그레이션 테스트 완료; PostgreSQL 설정 경로 제공 | 검증된 PostgreSQL 배포·통합 테스트 |
 | 큐/스케줄러 | 없음 | Redis queue, lease, 정기 실행 |
@@ -93,8 +93,8 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 ┌───────────────────────────────────────────────────────────────┐
 │          Backend Recommendation Builder                       │
 │                                                               │
-│  위험 원인 조사 · 필요한 근거 선택                            │
-│  거래처 지급이력 확인 · 위험 가설 수립                        │
+│  위험 원인 조사 · AI 조회 요청 검증·실행                      │
+│  거래처 지급이력 확인 · 위험 가설 적용 또는 규칙 폴백         │
 │  후보 대응안 구성 · 결과 재검토                               │
 │                                                               │
 │  ※ MVP: API 프로세스 · 확장 목표: backend worker              │
@@ -119,12 +119,12 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 │  13주 현금흐름 재계산                                         │
 │  적용 전후 비교 · 반동위험 검사 · 금융정책 검증               │
 └──────────────────────────────┬────────────────────────────────┘
-                               │ 최소 labels 또는 facts/evidence/actionCandidates
+                               │ 최소 labels 또는 조사 계약 또는 facts/evidence/actionCandidates
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
-│               AI Classification / Interpretation Service      │
+│        AI Classification / Investigation / Interpretation     │
 │                                                               │
-│  최소 라벨 그룹 제안 · 후보 순위화 · 설명 생성                │
+│  최소 라벨 그룹 제안 · 조회 요청·가설 정리 · 순위화·설명      │
 │  DB 직접 접근 없음 · MCP 직접 호출 없음                       │
 │  request/response 계약 검증 · 타임아웃 · 재시도 · 폴백        │
 └──────────────────────────────┬────────────────────────────────┘
@@ -161,6 +161,11 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 └───────────────────────────────────────────────────────────────┘
 ```
 
+위 그림의 AI 상자는 세 수명주기의 논리 경계를 함께 나타냅니다. 라벨 분류는 데이터
+정규화 시점, `/investigate/plan`·`/investigate/conclude` 조사는 기준 상태 계산 뒤,
+`/interpret`는 후보 검증 뒤에 호출됩니다. 조사 서비스는 도구 호출 요청만 반환하고,
+실제 도구 실행·감사 기록과 모든 금융 계산은 백엔드가 담당합니다.
+
 ---
 
 # 2. 핵심 실행 흐름
@@ -187,7 +192,9 @@ CSV 업로드 또는 데이터 수정
         ↓
 금융 코어의 기준 상태 계산
         ↓
-에이전트의 위험 원인 조사
+선택적 AI 위험 조사 (`off|shadow|on`, 조회 실행은 백엔드)
+        ↓
+에이전트의 위험 원인 조사 또는 독립 결정론 폴백
         ↓
 후보 대응안 생성 및 수치 검증
         ↓
@@ -198,6 +205,10 @@ AI 서비스 구조화 해석 요청
 최신 revision 결과만 최신 리포트로 승격
 ```
 
+위 순서는 `on` 적용 경로를 나타냅니다. `shadow`에서는 기존 결정론 조사와 후보 선택을
+먼저 완료한 뒤 AI 조사를 실행해 감사 기록만 남기며 리포트 내용과 공개 trace는 바꾸지
+않습니다.
+
 최초 설정 확정과 분석은 분리합니다. 환경설정과 여러 후보 결정은 먼저 하나의
 트랜잭션으로 저장하며, 전부 성공한 경우에만 분석을 한 번 실행합니다. 분석 중에는
 외부 AI 호출을 포함할 수 있으므로 데이터베이스 트랜잭션을 열어 두지 않습니다.
@@ -205,7 +216,11 @@ AI 서비스 구조화 해석 요청
 분석 결과 저장 순서는 다음 원칙을 따릅니다.
 
 ```text
-백엔드 계산 완료
+기준 상태 계산
+        ↓
+선택적 AI 조사 실행·턴 감사 저장
+        ↓
+후보·정책 검증과 백엔드 계산 완료
         ↓
 기준 분석 결과 저장
         ↓
@@ -287,12 +302,18 @@ MVP에서는 가상 적용
 * 정책 위반 여부
 
 동일한 입력과 설정에는 동일한 결과가 나오도록 구현합니다.
+선택적 AI 조사의 조회 순서와 가설 문구는 달라질 수 있지만, 위 금융 수치와 후보 평가·
+정책 검증 결과는 같은 스냅숏에서 동일해야 합니다.
 
 ## Backend Recommendation Builder
 
 계산 결과를 바탕으로 무엇을 추가로 확인하고 어떤 대응안을 검토할지 결정합니다.
 이 구성요소는 백엔드 분석 책임이며 별도 AI 서비스가 아닙니다. 현재 MVP에서는
-API 프로세스 안에서 실행하고 운영 확장 시 `flowguard-worker`로 분리합니다.
+API 프로세스 안에서 실행하고 운영 확장 시 `flowguard-worker`로 분리합니다. 선택적
+AI 조사 서비스는 어떤 허용 조회가 필요한지 요청하고 가설·후보 우선순위를 정리할 수
+있지만, 백엔드가 요청 범위와 중복을 검증하고 기존 `call()` 래퍼로 도구를 실행합니다.
+현재 후보 우선순위 응답은 감사 기록에 보존하며 결정론적 후보 생성·선택 순서를
+바꾸는 데 사용하지 않습니다.
 
 * 주요 위험 원인 가설 생성
 * 필요한 거래처 지급 근거 조회
@@ -321,13 +342,16 @@ Safe-to-Spend
 
 - 코어 도구와 FastMCP 진입점은 백엔드가 소유합니다. 현재 분석 경로는
   `CoreToolService`를 in-process로 호출합니다.
-- AI Classification / Interpretation Service는 같은 Python distribution을 사용하지만 포트와
-  환경변수가 분리된 별도 FastAPI 프로세스로 실행합니다.
+- AI Classification / Investigation / Interpretation Service는 같은 Python distribution을
+  사용하지만 포트와 환경변수가 분리된 별도 FastAPI 프로세스로 실행합니다.
 - 분류 경로는 숫자를 비식별화한 `labelId`, `text`, `direction`, `occurrences`만 받아
   같은 거래 대상을 가리키는 표기 그룹을 제안합니다. 금액·날짜·계좌·거래 ID는 받지
   않습니다.
 - 해석 경로는 백엔드가 전달한 `facts`, `evidence`, `actionCandidates`만 받아
   순위화·설명 생성을 수행합니다.
+- 조사 경로는 계약 `1.3`의 `/investigate/plan`·`/investigate/conclude`를 사용합니다.
+  요청 가능한 도구는 조회 3종뿐이며, AI는 DB·MCP에 접근하거나 도구를 직접 실행하지
+  않습니다.
 - OpenAI API 키는 AI 서비스 프로세스만 읽습니다.
 - AI 서비스는 DB나 MCP 도구에 접근하지 않습니다.
 - SQLite가 기본 저장소이며 Redis queue와 정기 scheduler는 사용하지 않습니다.
@@ -342,6 +366,28 @@ Safe-to-Spend
 검증을 마친 후보만 최종 추천으로 사용할 수 있습니다. 화면에는 숨은 사고과정이
 아니라 위험 가설, 실제 도구 호출, 후보 검증 결과, 최종 선택 이유로 구성된 공개
 감사 추적만 표시합니다.
+
+## AI 조사 상태와 폴백
+
+`FLOWGUARD_AI_INVESTIGATION`은 라벨 분류 플래그와 독립된 `off|shadow|on` 설정입니다.
+
+```text
+off     기존 결정론 조사만 실행; 조사 감사 행 없음
+shadow  결정론 결과와 공개 trace를 그대로 사용하고 AI 조사는 감사 기록에만 저장
+on      검증·감사 저장까지 성공한 AI 조사 가설만 적용
+```
+
+조사는 최대 2개 조회 단계, 도구 호출 6회, 전체 8초 안에서 진행합니다. 첫 계획 뒤
+결론을 요청하고, 필요할 때만 추가 조회 뒤 최종 결론을 한 번 더 요청하므로 AI 턴은
+최대 3개입니다. 연결 실패나 응답 거부는 기존 결정론 경로로 폴백합니다. 일부 관찰을
+얻은 뒤 실패한 `PARTIAL`도 관찰을 감사용으로만 보존하고, 최종 가설과 후보 생성을
+위해 결정론 경로가 근거를 독립적으로 다시 수집합니다.
+
+공개 감사 추적의 모드는 `DETERMINISTIC`, `AI_INVESTIGATED`, `AI_PARTIAL`입니다. AI가
+고른 조회 단계에는 `source`, `phase`, `reason`을 기록합니다. 홈 화면은 AI 출처를
+항상 표시하고 조회 이유는 접힌 상세로 제공하며, `AI_PARTIAL` 관찰이 최종 판단에
+사용되지 않았음을 명시합니다. 실행 요약은 `ai_investigation_runs`, 최대 세 턴의
+요청·검증 응답은 `ai_investigation_turns`에 저장해 감사와 재생에 사용합니다.
 
 ## AI 해석 상태 분리
 
@@ -753,6 +799,11 @@ analysis_results
 risk_metrics
 presentation_results
 
+ai_classification_runs
+ai_investigation_runs
+ai_investigation_turns
+ai_interpretation_runs
+
 agent_runs
 agent_hypotheses
 tool_executions
@@ -789,6 +840,12 @@ created_at
 않습니다. 데이터 변경 응답이 `analysis_required=true`를 반환하면 클라이언트가 분석
 API를 호출하고, API 요청 안에서 분석을 동기 실행합니다.
 
+같은 프로세스에서 사용자, 현재 데이터 revision, trigger와 정규화한 `as_of`가 같은
+분석 요청이 동시에 들어오면 첫 실행 하나만 수행하고 나머지는 같은 응답을 기다립니다.
+이 N1 방어는 프로세스 로컬 메모리 기반이며, 순차 재실행과 가상 분석은 합치지 않습니다.
+다중 API worker나 프로세스 재시작을 가로지르는 중복 방지는 공유 lease·작업 큐를
+도입하는 운영 확장 범위입니다.
+
 ```text
 CSV 업로드
 또는 사용자가 금융정보 수정
@@ -823,7 +880,7 @@ revision이 최신인 리포트만 승격
 
 > 아래 일곱 컨테이너는 현재 저장소에서 실행·검증된 배포 구성이 아니라 운영 확장을
 > 위한 목표안입니다. 현재 MVP에는 Dockerfile과 Compose가 없으며, 구현된 로컬 실행
-> 구성은 Web, 동기 분석과 코어 도구를 포함한 API, 선택적 AI 분류·해석 Service와
+> 구성은 Web, 동기 분석과 코어 도구를 포함한 API, 선택적 AI 분류·조사·해석 Service와
 > SQLite입니다. 자동 검증 경계는 0절을 따르며 Docker 사용 여부와 배포 방식은
 > `SPECIFICATION.md` 27절의 Open Decision으로 유지합니다.
 
@@ -844,7 +901,7 @@ flowguard-redis
 | `flowguard-web`      | Next.js 사용자 화면        |
 | `flowguard-api`      | FastAPI, 조회·수정·승인 API |
 | `flowguard-worker`   | 스냅숏·분석 작업·후보 생성·정기 실행 |
-| `flowguard-ai-service` | OpenAI 호출·라벨 그룹 제안·설명 생성·후보 순위화 |
+| `flowguard-ai-service` | OpenAI 호출·라벨 그룹·조사 요청·가설·설명·후보 순위화 |
 | `flowguard-mcp`      | 백엔드 소유 코어/MCP 도구      |
 | `flowguard-postgres` | 원천 데이터·분석 결과·감사 로그    |
 | `flowguard-redis`    | 작업 큐·분석 진행상태·에이전트 상태  |
@@ -865,11 +922,17 @@ Application API
   ├─ 동기 Analysis Orchestrator
   ├─ Deterministic Financial Core
   ├─ in-process CoreToolService
-  └─ 라벨 계약 검증·결정론적 그룹 폴백
+  └─ 라벨·조사 계약 검증과 독립 결정론 폴백
         ↓
 선택적 AI Label Classification (업로드 시, 별도 프로세스)
         ↓
 분류 감사 기록 및 사용자 확인 후보 저장 (SQLite)
+        ↓
+결정론적 기준 분석
+        ↓
+선택적 AI Investigation (`off|shadow|on`, 별도 프로세스)
+        ↓
+백엔드 조회 실행·조사 턴 감사·후보 검증
         ↓
 기준 분석 리포트 저장 (SQLite)
         ↓
@@ -894,6 +957,8 @@ PostgreSQL
 Financial Snapshot Builder
         ↓
 Deterministic Financial Core
+        ↓
+AI Investigation Service에 허용 조회 계획 요청
         ↓
 Backend Recommendation Builder
         ↓
