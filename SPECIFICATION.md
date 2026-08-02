@@ -50,6 +50,28 @@
 - 신용평가 또는 대출 거절 판단
 - 사용자의 승인 없는 행동 적용
 
+## 2.3 현재 공모전 MVP 실행 프로필
+
+이 명세의 `flowguard-worker`, `flowguard-mcp`, PostgreSQL, Redis, 컨테이너 이름은
+책임 경계 또는 운영 확장 목표를 표현한다. 현재 저장소에서 구현한 MVP 실행 프로필은
+다음과 같다. 자동 테스트는 SQLite와 대체 AI client를 사용하며, API와 별도 AI
+프로세스 사이의 성공 경로는 포함하지 않는다. 상세 검증 범위는 `DEVELOPMENT.md`를
+따른다.
+
+| 구성 | 현재 MVP 실행 방식 | 운영 확장 목표 |
+|---|---|---|
+| Web | Next.js 프로세스 | 독립 Web 컨테이너 |
+| API와 분석 | FastAPI 요청 안에서 `AnalysisOrchestrator` 동기 실행 | API와 durable worker 분리 |
+| 코어/MCP 도구 | MCP 계약과 같은 도구 구현을 API 프로세스에서 직접 호출; FastMCP 진입점 제공 | 별도 MCP 프로세스와 transport 연결 |
+| AI 해석 | 같은 Python distribution의 별도 FastAPI 프로세스, 단일 worker | 공유 멱등 저장소를 사용하는 독립 서비스 |
+| 저장소 | SQLite 기본·자동 테스트 대상; PostgreSQL URL과 driver 경로 제공 | 마이그레이션을 포함해 검증된 PostgreSQL 배포 |
+| 큐와 스케줄러 | 사용하지 않음 | Redis queue, lease, 정기 실행 |
+| 컨테이너 | Dockerfile과 Compose를 MVP 완료 조건에 포함하지 않음 | 운영 배포 방식 확정 후 구성 |
+
+따라서 현재 MVP에서 `worker`는 별도 프로세스 이름이 아니라 백엔드 분석 책임을
+가리킬 수 있다. Docker 사용 여부와 운영 배포 방식은 27절의 Open Decision으로
+유지한다.
+
 ---
 
 # 3. 핵심 용어
@@ -873,12 +895,14 @@ ACT_NOW
 
 ## 14.1 역할
 
-Liquidity Investigator Agent는 `flowguard-worker` 내부의 백엔드 구성요소이며 다음을 수행한다.
+Liquidity Investigator Agent는 백엔드 분석 책임을 담당하는 구성요소다. 현재 MVP에서는
+`flowguard-api` 프로세스 안에서 동기 실행하고, 운영 확장 시 같은 책임을
+`flowguard-worker`로 분리한다. 다음 작업을 수행한다.
 
 - 기준 분석 결과 확인
 - 주요 위험 원인 가설 생성
 - 필요한 추가 근거 선택
-- MCP 도구 호출
+- MCP 계약과 동일한 코어 도구 호출
 - 후보 대응안 구성
 - 대응안 평가 결과 검토
 - 효과가 부족하거나 반동위험이 있는 계획 수정
@@ -887,7 +911,7 @@ Liquidity Investigator Agent는 `flowguard-worker` 내부의 백엔드 구성요
 
 별도 AI 서비스가 존재하더라도, 다음 책임은 백엔드 조사기에 남는다.
 
-- MCP 도구 선택 및 호출
+- MCP 계약과 동일한 코어 도구 선택 및 호출
 - 후보 대응안 생성
 - 후보 대응안 평가
 - 정책 검증 통과 여부 판단
@@ -1274,6 +1298,10 @@ confirm_receivable
 ---
 
 # 20. 서비스 및 MCP 도구 계약
+
+현재 MVP의 조사기는 아래 MCP 계약과 동일한 `CoreToolService` 구현을 API 프로세스
+안에서 호출한다. `flowguard.mcp_server`는 같은 일곱 도구의 FastMCP 진입점을
+제공하지만, 별도 MCP 프로세스와 transport 연결은 운영 확장 범위다.
 
 ## 20.1 AI 해석 서버 계약(백엔드 ↔ AI Service)
 
@@ -1918,7 +1946,7 @@ MVP 핵심 구현은 다음 조건을 충족해야 한다.
 - 결제계좌 부족과 전체 유동성 부족을 구분할 수 있다.
 - Safe-to-Spend를 계산할 수 있다.
 - 예정 수입 지연 시나리오를 반영할 수 있다.
-- 에이전트가 MCP 도구를 통해 근거를 조회할 수 있다.
+- 에이전트가 MCP 계약과 호환되는 코어 도구를 통해 근거를 조회할 수 있다.
 - 후보 대응안을 정의된 행동 스키마로 생성할 수 있다.
 - 대응안을 가상 적용하고 전후 결과를 비교할 수 있다.
 - 반동위험을 탐지할 수 있다.

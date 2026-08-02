@@ -19,7 +19,8 @@ dev-api:
 	cd apps/api && ../../$(PYTHON) -m uvicorn flowguard.main:app --reload --port 8000
 
 dev-ai:
-	cd apps/api && ../../$(PYTHON) -m uvicorn flowguard.ai_service:app --reload --port 8001
+	$(PYTHON) -m uvicorn --app-dir apps/ai-service main:app --reload \
+		--reload-dir apps/ai-service --reload-dir apps/api/flowguard --port 8001
 
 dev-web:
 	npm --prefix apps/web run dev

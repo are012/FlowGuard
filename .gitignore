@@ -21,5 +21,6 @@ coverage/
 # Ignore documentation and text files that are not source code
 *.md
 *.txt
+!apps/ai-service/README.md
 
 .DS_Store
