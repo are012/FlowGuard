@@ -66,7 +66,7 @@ def test_preferences_are_persisted_and_used_by_dashboard(
     payload = dashboard.json()
     assert payload["safe_to_spend"]["protection_level"] == 0.95
     assert payload["safe_to_spend"]["safe_to_spend"] == 900_000
-    assert payload["analysis_status"] == "COMPLETED"
+    assert payload["analysis_status"] == "SUCCEEDED"
     assert "risk_metrics" in payload
     assert "data_quality" in payload
 

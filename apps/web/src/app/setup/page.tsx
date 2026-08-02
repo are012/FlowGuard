@@ -357,9 +357,15 @@ export default function SetupPage() {
       } else {
         setAnalysisResult({
           status: "COMPLETED",
-          analysis_status: "COMPLETED",
+          analysis_status: "SUCCEEDED",
+          interpretation_status: "NOT_REQUESTED",
+          execution_stage: "COMPLETED",
+          refresh_status: "SUCCEEDED",
           revision: committed.revision,
           analysis_revision: committed.revision,
+          report_revision: committed.revision,
+          latest_data_revision: committed.revision,
+          is_stale: false,
           analysis_required: false,
         });
       }
@@ -1163,11 +1169,15 @@ export default function SetupPage() {
                     analysisResult.analysis_id ||
                     "응답에 ID가 없습니다"}
                 </strong>
-                <span>현재 상태</span>
+                <span>금융 분석 상태</span>
                 <strong>
                   {analysisResult.analysis_status ||
                     analysisResult.status ||
                     "상태 정보 없음"}
+                </strong>
+                <span>AI 해석 상태</span>
+                <strong>
+                  {analysisResult.interpretation_status || "상태 정보 없음"}
                 </strong>
               </div>
               <Link className="button button-primary" href="/">

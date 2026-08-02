@@ -5,9 +5,17 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from flowguard.config import (
+    AI_CONNECT_TIMEOUT_SECONDS,
+    AI_CONTRACT_VERSION,
+    AI_DEFAULT_LOCALE,
+    AI_MAX_RETRIES,
+    AI_PROMPT_VERSION,
+    AI_RESPONSE_TIMEOUT_SECONDS,
+    AI_SCHEMA_VERSION,
+    AI_TOTAL_TIMEOUT_SECONDS,
     DEFAULT_SIMULATION_SEED,
     FINANCIAL_CORE_VERSION,
     POLICY_VERSION,
@@ -35,6 +43,8 @@ STATUS_MESSAGES = {
     "AGENT_INVESTIGATING": "유동성 위험의 원인과 근거를 조사하고 있습니다.",
     "PLAN_EVALUATING": "후보 대응안을 가상 적용하고 정책을 검증하고 있습니다.",
     "REPORT_BUILDING": "사용자용 분석 리포트를 만들고 있습니다.",
+    "INTERPRETATION_REQUESTING": "검증된 결과의 AI 해석을 요청하고 있습니다.",
+    "INTERPRETATION_VALIDATING": "AI 해석 응답의 계약과 후보를 검증하고 있습니다.",
     "COMPLETED": "분석이 완료되었습니다.",
     "FAILED": "분석에 실패했습니다.",
 }
@@ -58,7 +68,17 @@ class AnalysisOrchestrator:
         self.investigator = investigator or LiquidityInvestigator(repository, self.tools)
         self.cashflow_service = CashflowAnalysisService(self.tools)
         self.ai_client = ai_client or AIInterpretationClient(
-            base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001")
+            base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001"),
+            connect_timeout_seconds=float(
+                os.getenv("FLOWGUARD_AI_CONNECT_TIMEOUT_SECONDS", AI_CONNECT_TIMEOUT_SECONDS)
+            ),
+            read_timeout_seconds=float(
+                os.getenv("FLOWGUARD_AI_RESPONSE_TIMEOUT_SECONDS", AI_RESPONSE_TIMEOUT_SECONDS)
+            ),
+            total_timeout_seconds=float(
+                os.getenv("FLOWGUARD_AI_TOTAL_TIMEOUT_SECONDS", AI_TOTAL_TIMEOUT_SECONDS)
+            ),
+            max_retries=int(os.getenv("FLOWGUARD_AI_MAX_RETRIES", AI_MAX_RETRIES)),
         )
 
     def run(
@@ -278,23 +298,36 @@ class AnalysisOrchestrator:
             },
             "created_at": utc_now().isoformat(),
         }
-        interpretation = self._interpret_analysis(analysis_id, report)
-        report["ai_interpretation"] = interpretation
+        interpretation_request = self._build_ai_request_payload(
+            analysis_id=analysis_id,
+            snapshot_id=snapshot.snapshot_id,
+            snapshot_revision=current_state_revision,
+            report=report,
+        )
+        agent_state["interpretation_request_id"] = (
+            interpretation_request.get("requestId") if interpretation_request else None
+        )
         self.repository.save_report(
             analysis_id=analysis_id,
             user_id=user_id,
             snapshot_id=snapshot.snapshot_id,
             payload=report,
         )
-        return self.repository.transition_analysis(
-            analysis_id,
-            "COMPLETED",
+        interpretation = self._interpret_analysis(interpretation_request)
+        if interpretation.pop("_pending", False):
+            return self.repository.get_analysis(analysis_id)
+        return self.repository.complete_analysis_report(
+            user_id=user_id,
+            analysis_id=analysis_id,
+            snapshot_revision=current_state_revision,
             message=STATUS_MESSAGES["COMPLETED"],
             result={
-                "report_available": True,
+                "report_stored": True,
                 "is_virtual": is_virtual,
                 "base_snapshot_id": base_snapshot_id,
+                "interpretation_status": interpretation["status"],
             },
+            interpretation_id=interpretation.get("interpretation_id"),
         )
 
     def _with_revision_contract(
@@ -305,14 +338,20 @@ class AnalysisOrchestrator:
         analysis_revision: str | None,
     ) -> dict[str, Any]:
         revision = self.repository.current_state_revision(user_id)
+        analysis_status = analysis.get("analysis_status")
+        is_stale = analysis_revision is not None and analysis_revision != revision
         return {
             **analysis,
             "revision": revision,
             "analysis_revision": analysis_revision,
+            "report_revision": analysis_revision,
+            "latest_data_revision": revision,
+            "is_stale": is_stale,
+            "refresh_status": analysis_status,
             "analysis_required": (
-                analysis.get("status") != "COMPLETED"
+                analysis_status not in {"SUCCEEDED", "SUPERSEDED"}
                 or analysis_revision is None
-                or analysis_revision != revision
+                or is_stale
             ),
         }
 
@@ -420,24 +459,101 @@ class AnalysisOrchestrator:
             "rejection_reason": rejection_reason,
         }
 
-    def _interpret_analysis(self, analysis_id: str, report: dict[str, Any]) -> dict[str, Any]:
-        payload = self._build_ai_request_payload(report)
+    def _interpret_analysis(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if payload is None:
             return {
-                "analysisId": analysis_id,
-                "riskExplanation": "규칙 기반으로 위험을 요약했습니다.",
-                "rankedActions": [],
-                "userMessage": "AI 해석을 생략하고 규칙 기반 분석 결과를 제공합니다.",
-                "source": "fallback",
-                "fallbackReason": "no_risk_context",
+                "status": "NOT_REQUESTED",
+                "interpretation_id": None,
+                "attempt_count": 0,
+                "fallback_used": False,
+                "latency_ms": 0,
+                "response_payload": None,
+                "error_code": None,
             }
-        return self.ai_client.interpret(analysis_id=analysis_id, payload=payload)
+        run: dict[str, Any] | None = None
+        try:
+            run, created = self.repository.create_or_get_interpretation_run(
+                analysis_id=payload["analysisId"],
+                snapshot_id=payload["snapshotId"],
+                snapshot_revision=payload["snapshotRevision"],
+                request_id=payload["requestId"],
+                idempotency_key=payload["idempotencyKey"],
+                contract_version=payload["contractVersion"],
+                prompt_version=payload["promptVersion"],
+                model_name=os.getenv("FLOWGUARD_AI_MODEL_NAME", "gpt-5.6-luna"),
+            )
+            if not created:
+                return {
+                    **run,
+                    "_pending": run["status"] in {"QUEUED", "RUNNING"},
+                }
+            self._transition(payload["analysisId"], "INTERPRETATION_REQUESTING")
+            self.repository.update_interpretation_run(
+                run["interpretation_id"],
+                status="RUNNING",
+            )
+            outcome = self.ai_client.interpret(payload)
+            self._transition(payload["analysisId"], "INTERPRETATION_VALIDATING")
+            return self.repository.update_interpretation_run(
+                run["interpretation_id"],
+                status=outcome.status,
+                attempt_count=outcome.attempt_count,
+                fallback_used=outcome.fallback_used,
+                latency_ms=outcome.latency_ms,
+                response_payload=outcome.response_payload,
+                error_code=outcome.error_code,
+            )
+        except Exception:
+            error_code = (
+                "interpretation_internal_error"
+                if run is not None
+                else "interpretation_persistence_error"
+            )
+            failed = {
+                "status": "FAILED",
+                "interpretation_id": run.get("interpretation_id") if run else None,
+                "attempt_count": 0,
+                "fallback_used": False,
+                "latency_ms": 0,
+                "response_payload": None,
+                "error_code": error_code,
+            }
+            if run is not None:
+                try:
+                    return self.repository.update_interpretation_run(
+                        run["interpretation_id"],
+                        status="FAILED",
+                        attempt_count=0,
+                        fallback_used=False,
+                        latency_ms=0,
+                        error_code=error_code,
+                    )
+                except Exception:
+                    pass
+            return failed
 
-    def _build_ai_request_payload(self, report: dict[str, Any]) -> dict[str, Any] | None:
+    def _build_ai_request_payload(
+        self,
+        *,
+        analysis_id: str,
+        snapshot_id: str,
+        snapshot_revision: str,
+        report: dict[str, Any],
+    ) -> dict[str, Any] | None:
         next_risk = self._build_next_risk_payload(report.get("risk_metrics", {}))
         cashflow_summary = self._build_cashflow_summary(report.get("cashflow", {}))
         calculated_at = report.get("created_at")
-        safe_to_spend = report.get("safe_to_spend")
+        safe_to_spend_payload = report.get("safe_to_spend")
+        safe_to_spend = (
+            safe_to_spend_payload
+            if isinstance(safe_to_spend_payload, int)
+            else safe_to_spend_payload.get("safe_to_spend")
+            if isinstance(safe_to_spend_payload, dict)
+            else None
+        )
         if (
             calculated_at is None
             or not isinstance(safe_to_spend, int)
@@ -445,7 +561,22 @@ class AnalysisOrchestrator:
             or cashflow_summary is None
         ):
             return None
+        locale = os.getenv("FLOWGUARD_AI_LOCALE", AI_DEFAULT_LOCALE)
+        idempotency_key = (
+            f"{analysis_id}:{snapshot_revision}:contract-{AI_CONTRACT_VERSION}:"
+            f"prompt-{AI_PROMPT_VERSION}:{locale}"
+        )
+        request_id = f"ai-request-{uuid5(NAMESPACE_URL, idempotency_key)}"
         return {
+            "schemaVersion": AI_SCHEMA_VERSION,
+            "contractVersion": AI_CONTRACT_VERSION,
+            "promptVersion": AI_PROMPT_VERSION,
+            "requestId": request_id,
+            "idempotencyKey": idempotency_key,
+            "analysisId": analysis_id,
+            "snapshotId": snapshot_id,
+            "snapshotRevision": snapshot_revision,
+            "locale": locale,
             "calculatedAt": calculated_at,
             "facts": {
                 "safeToSpend": safe_to_spend,
@@ -502,14 +633,22 @@ class AnalysisOrchestrator:
         built_candidates: list[dict[str, Any]] = []
         for candidate in candidates:
             action_id = candidate.get("action_id")
-            if not isinstance(action_id, str) or not action_id:
+            policy = candidate.get("policy_result") or {}
+            evaluation = candidate.get("evaluation") or {}
+            if (
+                not isinstance(action_id, str)
+                or not action_id
+                or candidate.get("feasible") is not True
+                or evaluation.get("valid") is not True
+                or policy.get("valid") is not True
+            ):
                 continue
             built_candidates.append(
                 {
                     "actionId": action_id,
                     "type": candidate.get("type"),
                     "amount": candidate.get("amount"),
-                    "feasible": candidate.get("feasible"),
+                    "feasible": True,
                 }
             )
         return built_candidates

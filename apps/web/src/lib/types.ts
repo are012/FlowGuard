@@ -1,5 +1,33 @@
 export type RiskStatus = "STABLE" | "VERIFY" | "PREPARE" | "ACT_NOW";
 
+export type AnalysisStatus =
+  | "QUEUED"
+  | "RUNNING"
+  | "SUCCEEDED"
+  | "FAILED"
+  | "SUPERSEDED";
+
+export type InterpretationStatus =
+  | "NOT_REQUESTED"
+  | "QUEUED"
+  | "RUNNING"
+  | "SUCCEEDED"
+  | "FALLBACK"
+  | "FAILED"
+  | "STALE";
+
+export type AnalysisExecutionStage =
+  | "QUEUED"
+  | "SNAPSHOT_BUILDING"
+  | "BASELINE_ANALYZING"
+  | "AGENT_INVESTIGATING"
+  | "PLAN_EVALUATING"
+  | "REPORT_BUILDING"
+  | "INTERPRETATION_REQUESTING"
+  | "INTERPRETATION_VALIDATING"
+  | "COMPLETED"
+  | "FAILED";
+
 export interface BindingConstraint {
   date?: string | null;
   event_id?: string | null;
@@ -159,14 +187,45 @@ export interface AgentDecisionTrace {
   } | null;
 }
 
+export interface InterpretationRankedAction {
+  actionId: string;
+  priority: number;
+  reason: string;
+}
+
+export interface InterpretationPayload {
+  schemaVersion?: "1.1";
+  contractVersion?: "1.1";
+  promptVersion?: string;
+  requestId?: string;
+  idempotencyKey?: string;
+  analysisId?: string;
+  snapshotId?: string;
+  snapshotRevision?: string;
+  locale?: string;
+  riskExplanation?: string;
+  rankedActions?: InterpretationRankedAction[];
+  userMessage?: string;
+  source?: "AI" | "DETERMINISTIC_FALLBACK";
+  fallbackReason?: string | null;
+}
+
 export interface DashboardResponse {
+  analysis_id?: string;
   analysis_run_id?: string;
   snapshot_id?: string;
   as_of?: string;
   revision?: string;
   analysis_revision?: string;
+  report_revision?: string | null;
+  latest_data_revision?: string;
+  is_stale?: boolean;
   analysis_required?: boolean;
-  analysis_status?: string;
+  analysis_status?: AnalysisStatus;
+  interpretation_status?: InterpretationStatus;
+  execution_stage?: AnalysisExecutionStage;
+  refresh_status?: AnalysisStatus;
+  interpretation?: InterpretationPayload | null;
   is_virtual?: boolean;
   safe_to_spend?: SafeToSpend | number | null;
   risk_metrics?: RiskMetrics;
@@ -351,9 +410,16 @@ export interface AnalysisResponse {
   analysis_run_id?: string;
   revision?: string;
   analysis_revision?: string;
+  report_revision?: string | null;
+  latest_data_revision?: string;
+  is_stale?: boolean;
   analysis_required?: boolean;
   status?: string;
-  analysis_status?: string;
+  analysis_status?: AnalysisStatus;
+  interpretation_status?: InterpretationStatus;
+  execution_stage?: AnalysisExecutionStage;
+  refresh_status?: AnalysisStatus;
+  interpretation?: InterpretationPayload | null;
   before?: EvaluationState;
   after?: EvaluationState;
   risk_shift?: RiskShift;

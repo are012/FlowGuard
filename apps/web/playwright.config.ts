@@ -23,6 +23,14 @@ const pythonExecutable =
   process.env.FLOWGUARD_PYTHON ||
   pythonCandidates.find((candidate) => existsSync(candidate)) ||
   "python";
+const applicationEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter(
+    ([name, value]) =>
+      typeof value === "string" &&
+      name !== "FLOWGUARD_AGENT_MODE" &&
+      !name.startsWith("OPENAI_"),
+  ),
+) as Record<string, string>;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -48,12 +56,11 @@ export default defineConfig({
         "--host 127.0.0.1 --port 8100",
       cwd: apiDirectory,
       env: {
-        ...process.env,
+        ...applicationEnvironment,
         DATABASE_URL: databaseUrl,
-        FLOWGUARD_AGENT_MODE: "deterministic",
+        FLOWGUARD_AI_SERVER_URL: "http://127.0.0.1:1",
         FLOWGUARD_CORS_ORIGINS: WEB_URL,
         FLOWGUARD_DEMO_USER_ID: "e2e-user",
-        OPENAI_API_KEY: "",
       },
       reuseExistingServer: false,
       timeout: 120_000,
@@ -63,7 +70,7 @@ export default defineConfig({
       command: "npm run dev -- --hostname 127.0.0.1 --port 3100",
       cwd: webDirectory,
       env: {
-        ...process.env,
+        ...applicationEnvironment,
         NEXT_PUBLIC_API_URL: API_URL,
       },
       reuseExistingServer: false,

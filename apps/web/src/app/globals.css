@@ -1099,27 +1099,41 @@ svg {
   white-space: nowrap;
 }
 
-.agent-mode > span.is-luna {
-  background: var(--green-dark);
-  border-color: var(--green-dark);
-  color: white;
-}
-
 .agent-mode small {
   color: var(--ink-muted);
   font-size: 9px;
 }
 
-.agent-fallback {
+.agent-interpretation {
   align-items: center;
-  background: var(--orange-soft);
+  background: var(--blue-soft);
   border-radius: 13px;
-  color: #7b5b24;
+  color: var(--blue);
   display: flex;
   font-size: 10px;
   gap: 8px;
   margin-top: 18px;
   padding: 11px 13px;
+}
+
+.agent-interpretation.interpretation-succeeded {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.agent-interpretation.interpretation-fallback {
+  background: var(--orange-soft);
+  color: #7b5b24;
+}
+
+.agent-interpretation.interpretation-failed {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.agent-interpretation.interpretation-stale {
+  background: var(--yellow-soft);
+  color: var(--yellow);
 }
 
 .agent-trace-list {

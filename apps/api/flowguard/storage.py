@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
@@ -16,6 +14,7 @@ from uuid import uuid4
 from pydantic import BaseModel as PydanticModel
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -64,6 +63,8 @@ ANALYSIS_STATUSES = (
     "AGENT_INVESTIGATING",
     "PLAN_EVALUATING",
     "REPORT_BUILDING",
+    "INTERPRETATION_REQUESTING",
+    "INTERPRETATION_VALIDATING",
     "COMPLETED",
     "FAILED",
 )
@@ -74,7 +75,9 @@ ANALYSIS_TRANSITIONS = {
     "BASELINE_ANALYZING": {"AGENT_INVESTIGATING", "FAILED"},
     "AGENT_INVESTIGATING": {"PLAN_EVALUATING", "FAILED"},
     "PLAN_EVALUATING": {"REPORT_BUILDING", "FAILED"},
-    "REPORT_BUILDING": {"COMPLETED", "FAILED"},
+    "REPORT_BUILDING": {"INTERPRETATION_REQUESTING", "COMPLETED", "FAILED"},
+    "INTERPRETATION_REQUESTING": {"INTERPRETATION_VALIDATING", "COMPLETED", "FAILED"},
+    "INTERPRETATION_VALIDATING": {"COMPLETED", "FAILED"},
     "COMPLETED": set(),
     "FAILED": set(),
 }
@@ -134,6 +137,16 @@ class CurrentRecordRow(Base):
     )
 
     __table_args__ = (Index("ix_current_records_user_kind", "user_id", "kind"),)
+
+
+class DataRevisionRow(Base):
+    __tablename__ = "data_revisions"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
 
 
 class FinancialSnapshotRow(Base):
@@ -210,6 +223,47 @@ class AnalysisReportRow(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now, index=True
     )
+
+
+class LatestReportPointerRow(Base):
+    __tablename__ = "latest_report_pointers"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    analysis_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_reports.analysis_id"), nullable=False, unique=True
+    )
+    snapshot_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class AIInterpretationRunRow(Base):
+    __tablename__ = "ai_interpretation_runs"
+
+    interpretation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    analysis_id: Mapped[str] = mapped_column(
+        ForeignKey("analysis_runs.analysis_id"), nullable=False, index=True
+    )
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("financial_snapshots.snapshot_id"), nullable=False, index=True
+    )
+    snapshot_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    contract_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class RecommendationRow(Base):
@@ -303,6 +357,7 @@ class FlowGuardRepository:
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
+        self._backfill_latest_report_pointers()
 
     @contextmanager
     def _session(self) -> Iterable[Session]:
@@ -314,12 +369,91 @@ class FlowGuardRepository:
                 session.rollback()
                 raise
 
+    def _backfill_latest_report_pointers(self) -> None:
+        """Give databases created before pointer support an initial latest report."""
+
+        with self._session() as session:
+            user_ids = session.scalars(select(AnalysisReportRow.user_id).distinct()).all()
+            for user_id in user_ids:
+                if session.get(LatestReportPointerRow, user_id) is not None:
+                    continue
+                report = session.scalar(
+                    select(AnalysisReportRow)
+                    .join(
+                        AnalysisRunRow,
+                        AnalysisRunRow.analysis_id == AnalysisReportRow.analysis_id,
+                    )
+                    .where(
+                        AnalysisReportRow.user_id == user_id,
+                        AnalysisRunRow.status == "COMPLETED",
+                    )
+                    .order_by(AnalysisReportRow.created_at.desc())
+                    .limit(1)
+                )
+                if report is None:
+                    continue
+                revision = str(
+                    report.payload.get("current_state_revision")
+                    or report.payload.get("analysis_revision")
+                    or "rev-0"
+                )
+                session.add(
+                    LatestReportPointerRow(
+                        user_id=user_id,
+                        analysis_id=report.analysis_id,
+                        snapshot_revision=revision,
+                    )
+                )
+
+    @staticmethod
+    def _data_revision(session: Session, user_id: str) -> int:
+        row = session.get(DataRevisionRow, user_id)
+        return row.revision if row is not None else 0
+
+    @staticmethod
+    def _bump_data_revision(session: Session, user_id: str) -> int:
+        dialect = session.get_bind().dialect.name
+        if dialect in {"postgresql", "sqlite"}:
+            now = utc_now()
+            if dialect == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert
+            else:
+                from sqlalchemy.dialects.sqlite import insert
+
+            statement = (
+                insert(DataRevisionRow)
+                .values(user_id=user_id, revision=1, updated_at=now)
+                .on_conflict_do_update(
+                    index_elements=[DataRevisionRow.user_id],
+                    set_={
+                        "revision": DataRevisionRow.revision + 1,
+                        "updated_at": now,
+                    },
+                )
+                .returning(DataRevisionRow.revision)
+            )
+            revision = session.scalar(statement)
+            if revision is None:
+                raise StorageError("data revision increment returned no value")
+            return revision
+
+        row = session.get(DataRevisionRow, user_id, with_for_update=True)
+        if row is None:
+            row = DataRevisionRow(user_id=user_id, revision=1)
+            session.add(row)
+        else:
+            row.revision += 1
+            row.updated_at = utc_now()
+        return row.revision
+
     def upsert_records(self, user_id: str, kind: str, records: Iterable[Mapping[str, Any]]) -> int:
         id_field = self._id_field(kind)
+        materialized = [jsonable(item) for item in records]
         count = 0
         with self._session() as session:
-            for raw in records:
-                payload = jsonable(raw)
+            if materialized:
+                self._bump_data_revision(session, user_id)
+            for payload in materialized:
                 record_id = payload.get(id_field)
                 if not isinstance(record_id, str) or not record_id:
                     raise StorageError(f"{kind} record requires {id_field}")
@@ -363,6 +497,8 @@ class FlowGuardRepository:
             prepared[kind] = (id_field, payloads)
 
         with self._session() as session:
+            if prepared:
+                self._bump_data_revision(session, user_id)
             for kind, (id_field, payloads) in prepared.items():
                 if kind in replace_kinds:
                     session.execute(
@@ -404,6 +540,7 @@ class FlowGuardRepository:
             if not isinstance(payload.get(id_field), str) or not payload[id_field]:
                 raise StorageError(f"{kind} record requires {id_field}")
         with self._session() as session:
+            self._bump_data_revision(session, user_id)
             session.execute(
                 delete(CurrentRecordRow).where(
                     CurrentRecordRow.user_id == user_id,
@@ -425,6 +562,9 @@ class FlowGuardRepository:
         """Delete one user's demo state and analysis artifacts atomically."""
 
         with self._session() as session:
+            # Keep the sequencing row so a later import cannot reuse an older
+            # revision identifier after reset (the A -> reset -> A ABA case).
+            self._bump_data_revision(session, user_id)
             analysis_ids = list(
                 session.scalars(
                     select(AnalysisRunRow.analysis_id).where(AnalysisRunRow.user_id == user_id)
@@ -432,8 +572,16 @@ class FlowGuardRepository:
             )
             session.execute(delete(ApprovalAuditRow).where(ApprovalAuditRow.user_id == user_id))
             session.execute(delete(RecommendationRow).where(RecommendationRow.user_id == user_id))
+            session.execute(
+                delete(LatestReportPointerRow).where(LatestReportPointerRow.user_id == user_id)
+            )
             session.execute(delete(AnalysisReportRow).where(AnalysisReportRow.user_id == user_id))
             if analysis_ids:
+                session.execute(
+                    delete(AIInterpretationRunRow).where(
+                        AIInterpretationRunRow.analysis_id.in_(analysis_ids)
+                    )
+                )
                 session.execute(
                     delete(ToolExecutionRow).where(ToolExecutionRow.analysis_id.in_(analysis_ids))
                 )
@@ -484,6 +632,7 @@ class FlowGuardRepository:
         if id_field in clean_changes and clean_changes[id_field] != record_id:
             raise StorageConflict(f"{id_field} cannot be changed")
         with self._session() as session:
+            self._bump_data_revision(session, user_id)
             row = session.get(
                 CurrentRecordRow,
                 {"user_id": user_id, "kind": kind, "record_id": record_id},
@@ -563,35 +712,23 @@ class FlowGuardRepository:
     def current_records_with_revision(
         self, user_id: str
     ) -> tuple[dict[str, list[dict[str, Any]]], str]:
-        """Read all mutable user state in one transaction and hash that exact view."""
+        """Read all mutable user state with its monotonic revision."""
 
         with self._session() as session:
+            revision_row = session.get(DataRevisionRow, user_id, with_for_update=True)
             rows = session.scalars(
                 select(CurrentRecordRow)
                 .where(CurrentRecordRow.user_id == user_id)
                 .order_by(CurrentRecordRow.kind, CurrentRecordRow.record_id)
             ).all()
             records = {kind: [] for kind in CURRENT_KINDS}
-            canonical: list[dict[str, Any]] = []
             for row in rows:
                 if row.kind not in records:
                     continue
                 payload = dict(row.payload)
                 records[row.kind].append(payload)
-                canonical.append(
-                    {
-                        "kind": row.kind,
-                        "record_id": row.record_id,
-                        "payload": payload,
-                    }
-                )
-        encoded = json.dumps(
-            canonical,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        return records, hashlib.sha256(encoded).hexdigest()
+            revision = revision_row.revision if revision_row is not None else 0
+        return records, f"rev-{revision}"
 
     def current_state_revision(self, user_id: str) -> str:
         return self.current_records_with_revision(user_id)[1]
@@ -733,22 +870,163 @@ class FlowGuardRepository:
 
     def latest_report(self, user_id: str) -> dict[str, Any]:
         with self._session() as session:
-            row = session.scalar(
-                select(AnalysisReportRow)
-                .join(
-                    AnalysisRunRow,
-                    AnalysisRunRow.analysis_id == AnalysisReportRow.analysis_id,
-                )
-                .where(
-                    AnalysisReportRow.user_id == user_id,
-                    AnalysisRunRow.status == "COMPLETED",
-                )
-                .order_by(AnalysisReportRow.created_at.desc())
-                .limit(1)
-            )
+            pointer = session.get(LatestReportPointerRow, user_id)
+            if pointer is None:
+                raise RecordNotFound(f"latest report for user:{user_id} not found")
+            row = session.get(AnalysisReportRow, pointer.analysis_id)
             if row is None:
                 raise RecordNotFound(f"latest report for user:{user_id} not found")
             return dict(row.payload)
+
+    def report_for_analysis(self, analysis_id: str) -> dict[str, Any]:
+        with self._session() as session:
+            row = session.get(AnalysisReportRow, analysis_id)
+            if row is None:
+                raise RecordNotFound(f"report for analysis:{analysis_id} not found")
+            return dict(row.payload)
+
+    def promote_report_if_current(
+        self,
+        *,
+        user_id: str,
+        analysis_id: str,
+        snapshot_revision: str,
+    ) -> bool:
+        """Atomically move the latest pointer only for the current data revision."""
+
+        with self._session() as session:
+            revision_row = session.get(DataRevisionRow, user_id, with_for_update=True)
+            current_revision = f"rev-{revision_row.revision if revision_row else 0}"
+            if snapshot_revision != current_revision:
+                return False
+            analysis = session.get(AnalysisRunRow, analysis_id)
+            report = session.get(AnalysisReportRow, analysis_id)
+            if (
+                analysis is None
+                or report is None
+                or analysis.user_id != user_id
+                or report.user_id != user_id
+                or analysis.status != "COMPLETED"
+            ):
+                raise StorageConflict("only a completed matching report can be promoted")
+            pointer = session.get(LatestReportPointerRow, user_id)
+            if pointer is None:
+                session.add(
+                    LatestReportPointerRow(
+                        user_id=user_id,
+                        analysis_id=analysis_id,
+                        snapshot_revision=snapshot_revision,
+                    )
+                )
+            else:
+                pointer.analysis_id = analysis_id
+                pointer.snapshot_revision = snapshot_revision
+                pointer.updated_at = utc_now()
+            return True
+
+    def complete_analysis_report(
+        self,
+        *,
+        user_id: str,
+        analysis_id: str,
+        snapshot_revision: str,
+        message: str,
+        result: Mapping[str, Any],
+        interpretation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Complete a run and conditionally promote its immutable report atomically."""
+
+        with self._session() as session:
+            revision_row = session.get(DataRevisionRow, user_id, with_for_update=True)
+            latest_data_revision = f"rev-{revision_row.revision if revision_row else 0}"
+            analysis = session.get(AnalysisRunRow, analysis_id)
+            report = session.get(AnalysisReportRow, analysis_id)
+            if (
+                analysis is None
+                or report is None
+                or analysis.user_id != user_id
+                or report.user_id != user_id
+                or analysis.snapshot_id != report.snapshot_id
+                or analysis.status
+                not in {
+                    "REPORT_BUILDING",
+                    "INTERPRETATION_REQUESTING",
+                    "INTERPRETATION_VALIDATING",
+                }
+            ):
+                raise StorageConflict("only a finalizing matching report can be completed")
+
+            promoted = snapshot_revision == latest_data_revision
+            interpretation_status = str(result.get("interpretation_status", "NOT_REQUESTED"))
+            if not promoted and interpretation_id is not None:
+                interpretation = session.get(AIInterpretationRunRow, interpretation_id)
+                if interpretation is None or interpretation.analysis_id != analysis_id:
+                    raise StorageConflict("interpretation run does not match its analysis")
+                interpretation.status = "STALE"
+                interpretation.completed_at = interpretation.completed_at or utc_now()
+                interpretation_status = "STALE"
+
+            completed_result = {
+                **jsonable(result),
+                "report_available": promoted,
+                "analysis_status": "SUCCEEDED" if promoted else "SUPERSEDED",
+                "interpretation_status": interpretation_status,
+                "execution_stage": "COMPLETED",
+                "snapshot_revision": snapshot_revision,
+                "latest_data_revision": latest_data_revision,
+                "interpretation_id": interpretation_id,
+            }
+            sequence = (
+                session.scalar(
+                    select(func.max(AnalysisEventRow.sequence)).where(
+                        AnalysisEventRow.analysis_id == analysis_id
+                    )
+                )
+                or 0
+            ) + 1
+            completed_at = utc_now()
+            analysis.status = "COMPLETED"
+            analysis.result = completed_result
+            analysis.updated_at = completed_at
+            analysis.completed_at = completed_at
+            session.add(
+                AnalysisEventRow(
+                    analysis_id=analysis_id,
+                    sequence=sequence,
+                    status="COMPLETED",
+                    message=message,
+                    details={},
+                )
+            )
+
+            if promoted:
+                pointer = session.get(LatestReportPointerRow, user_id)
+                if pointer is None:
+                    session.add(
+                        LatestReportPointerRow(
+                            user_id=user_id,
+                            analysis_id=analysis_id,
+                            snapshot_revision=snapshot_revision,
+                        )
+                    )
+                else:
+                    pointer.analysis_id = analysis_id
+                    pointer.snapshot_revision = snapshot_revision
+                    pointer.updated_at = completed_at
+            session.flush()
+            return self._analysis_dict(analysis)
+
+    def latest_report_pointer(self, user_id: str) -> dict[str, Any] | None:
+        with self._session() as session:
+            row = session.get(LatestReportPointerRow, user_id)
+            if row is None:
+                return None
+            return {
+                "user_id": row.user_id,
+                "analysis_id": row.analysis_id,
+                "snapshot_revision": row.snapshot_revision,
+                "updated_at": row.updated_at.isoformat(),
+            }
 
     def latest_analysis(self, user_id: str) -> dict[str, Any] | None:
         with self._session() as session:
@@ -759,6 +1037,117 @@ class FlowGuardRepository:
                 .limit(1)
             )
             return self._analysis_dict(row) if row is not None else None
+
+    def create_or_get_interpretation_run(
+        self,
+        *,
+        analysis_id: str,
+        snapshot_id: str,
+        snapshot_revision: str,
+        request_id: str,
+        idempotency_key: str,
+        contract_version: str,
+        prompt_version: str,
+        model_name: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        identity = {
+            "analysis_id": analysis_id,
+            "snapshot_id": snapshot_id,
+            "snapshot_revision": snapshot_revision,
+            "request_id": request_id,
+            "contract_version": contract_version,
+            "prompt_version": prompt_version,
+        }
+        try:
+            with self._session() as session:
+                existing = session.scalar(
+                    select(AIInterpretationRunRow).where(
+                        AIInterpretationRunRow.idempotency_key == idempotency_key
+                    )
+                )
+                if existing is not None:
+                    self._assert_interpretation_identity(existing, identity)
+                    return self._interpretation_dict(existing), False
+                row = AIInterpretationRunRow(
+                    interpretation_id=f"interpretation-{uuid4()}",
+                    analysis_id=analysis_id,
+                    snapshot_id=snapshot_id,
+                    snapshot_revision=snapshot_revision,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                    contract_version=contract_version,
+                    prompt_version=prompt_version,
+                    model_name=model_name,
+                    status="QUEUED",
+                )
+                session.add(row)
+                session.flush()
+                return self._interpretation_dict(row), True
+        except IntegrityError as exc:
+            # A concurrent insert may win after the initial lookup. Resolve the
+            # unique-key race by returning that exact logical request only.
+            with self._session() as session:
+                existing = session.scalar(
+                    select(AIInterpretationRunRow).where(
+                        AIInterpretationRunRow.idempotency_key == idempotency_key
+                    )
+                )
+                if existing is None:
+                    raise StorageConflict(
+                        "could not resolve interpretation idempotency race"
+                    ) from exc
+                self._assert_interpretation_identity(existing, identity)
+                return self._interpretation_dict(existing), False
+
+    def update_interpretation_run(
+        self,
+        interpretation_id: str,
+        *,
+        status: str,
+        attempt_count: int | None = None,
+        fallback_used: bool | None = None,
+        latency_ms: int | None = None,
+        response_payload: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
+        allowed = {"QUEUED", "RUNNING", "SUCCEEDED", "FALLBACK", "FAILED", "STALE"}
+        if status not in allowed:
+            raise StorageError(f"unsupported interpretation status {status}")
+        with self._session() as session:
+            row = session.get(AIInterpretationRunRow, interpretation_id)
+            if row is None:
+                raise RecordNotFound(f"interpretation:{interpretation_id} not found")
+            row.status = status
+            if attempt_count is not None:
+                row.attempt_count = attempt_count
+            if fallback_used is not None:
+                row.fallback_used = fallback_used
+            if latency_ms is not None:
+                row.latency_ms = latency_ms
+            if response_payload is not None:
+                row.response_payload = jsonable(response_payload)
+            row.error_code = error_code
+            if status in {"SUCCEEDED", "FALLBACK", "FAILED", "STALE"}:
+                row.completed_at = row.completed_at or utc_now()
+            session.flush()
+            return self._interpretation_dict(row)
+
+    def get_interpretation_run(self, interpretation_id: str) -> dict[str, Any]:
+        with self._session() as session:
+            row = session.get(AIInterpretationRunRow, interpretation_id)
+            if row is None:
+                raise RecordNotFound(f"interpretation:{interpretation_id} not found")
+            return self._interpretation_dict(row)
+
+    def latest_interpretation_run(self, analysis_id: str) -> dict[str, Any] | None:
+        with self._session() as session:
+            row = session.scalar(
+                select(AIInterpretationRunRow)
+                .where(AIInterpretationRunRow.analysis_id == analysis_id)
+                .order_by(AIInterpretationRunRow.created_at.desc())
+                .limit(1)
+            )
+            return self._interpretation_dict(row) if row is not None else None
 
     def save_recommendation(
         self,
@@ -922,19 +1311,72 @@ class FlowGuardRepository:
 
     @staticmethod
     def _analysis_dict(row: AnalysisRunRow) -> dict[str, Any]:
+        result = row.result or {}
+        if row.status == "QUEUED":
+            default_analysis_status = "QUEUED"
+        elif row.status == "FAILED":
+            default_analysis_status = "FAILED"
+        elif row.status == "COMPLETED":
+            default_analysis_status = "SUCCEEDED"
+        else:
+            default_analysis_status = "RUNNING"
+        default_interpretation_status = (
+            "RUNNING"
+            if row.status in {"INTERPRETATION_REQUESTING", "INTERPRETATION_VALIDATING"}
+            else "NOT_REQUESTED"
+        )
         return {
             "analysis_id": row.analysis_id,
             "user_id": row.user_id,
             "snapshot_id": row.snapshot_id,
             "status": row.status,
+            "analysis_status": result.get("analysis_status", default_analysis_status),
+            "interpretation_status": result.get(
+                "interpretation_status", default_interpretation_status
+            ),
+            "execution_stage": result.get("execution_stage", row.status),
             "trigger_type": row.trigger_type,
             "metadata": row.metadata_json,
-            "result": row.result,
+            "result": result or None,
             "error": row.error,
             "created_at": row.created_at.isoformat(),
             "updated_at": row.updated_at.isoformat(),
             "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         }
+
+    @staticmethod
+    def _interpretation_dict(row: AIInterpretationRunRow) -> dict[str, Any]:
+        return {
+            "interpretation_id": row.interpretation_id,
+            "analysis_id": row.analysis_id,
+            "snapshot_id": row.snapshot_id,
+            "snapshot_revision": row.snapshot_revision,
+            "request_id": row.request_id,
+            "idempotency_key": row.idempotency_key,
+            "contract_version": row.contract_version,
+            "prompt_version": row.prompt_version,
+            "model_name": row.model_name,
+            "status": row.status,
+            "attempt_count": row.attempt_count,
+            "fallback_used": row.fallback_used,
+            "latency_ms": row.latency_ms,
+            "response_payload": row.response_payload,
+            "error_code": row.error_code,
+            "created_at": row.created_at.isoformat(),
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        }
+
+    @staticmethod
+    def _assert_interpretation_identity(
+        row: AIInterpretationRunRow,
+        expected: Mapping[str, str],
+    ) -> None:
+        mismatches = [field for field, value in expected.items() if getattr(row, field) != value]
+        if mismatches:
+            raise StorageConflict(
+                "idempotency key was reused with different interpretation fields: "
+                + ", ".join(mismatches)
+            )
 
     @staticmethod
     def _recommendation_dict(row: RecommendationRow) -> dict[str, Any]:
