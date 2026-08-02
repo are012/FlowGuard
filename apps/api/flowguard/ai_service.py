@@ -11,18 +11,30 @@ import hashlib
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 from flowguard.ai_contract import (
     AIActionCandidateRef,
+    AIIdentifier,
     AIToBackendResponse,
     BackendToAIRequest,
+    LabelClassificationGroup,
+    LabelClassificationRequest,
+    LabelClassificationResponse,
 )
 from flowguard.observability import configure_logging, log_event
 
@@ -35,6 +47,16 @@ candidates supplied by the backend. Use only the supplied facts and evidence.
 Never invent or change an amount, date, risk decision, or action ID. Omit any
 candidate that is not feasible. Keep the user message concise (one or two
 sentences) and write it in the requested locale. Do not expose hidden reasoning.
+""".strip()
+
+LABEL_CLASSIFICATION_INSTRUCTIONS = """
+You are FlowGuard's label classification service. Group only labels that refer
+to the same real-world entity, and never mix INFLOW and OUTFLOW labels. Use only
+the supplied label ID, label text, direction, and occurrence count. Include
+every supplied label ID exactly once, either in a group or in ungrouped, and
+never invent an ID. Return only the requested structured fields. Do not put any
+number, amount, date, account information, transaction ID, or probability in
+normalizedName or reason. Do not expose hidden reasoning.
 """.strip()
 
 
@@ -60,12 +82,37 @@ class InterpretationContent(BaseModel):
         return self
 
 
+class LabelClassificationContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    groups: list[LabelClassificationGroup] = Field(max_length=500)
+    ungrouped: list[AIIdentifier] = Field(max_length=500)
+
+    @model_validator(mode="after")
+    def group_ids_are_unique(self) -> LabelClassificationContent:
+        group_ids = [item.groupId for item in self.groups]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("classification group IDs must be unique")
+        return self
+
+
+@dataclass(slots=True)
+class _ClassificationInFlight:
+    fingerprint: str
+    completion: Event
+    failure_status_code: int | None = None
+    failure_detail: Any = None
+
+
 def create_app(*, openai_client: Any | None = None, model: str | None = None) -> FastAPI:
     configure_logging()
     app = FastAPI(
         title="FlowGuard AI Interpretation Service",
-        version="1.1.0",
-        description="Ranks validated FlowGuard actions and generates user-facing explanations.",
+        version="1.2.0",
+        description=(
+            "Groups privacy-minimized labels, ranks validated FlowGuard actions, "
+            "and generates user-facing explanations."
+        ),
     )
     configured_model = model or os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
     client = openai_client
@@ -76,6 +123,9 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
     cache_lock = Lock()
     response_cache: dict[str, tuple[str, AIToBackendResponse]] = {}
     in_flight: dict[str, tuple[str, Event]] = {}
+    classification_cache_lock = Lock()
+    classification_response_cache: dict[str, tuple[str, LabelClassificationResponse]] = {}
+    classification_in_flight: dict[str, _ClassificationInFlight] = {}
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -213,10 +263,154 @@ def create_app(*, openai_client: Any | None = None, model: str | None = None) ->
         )
         return result
 
+    @app.post("/classify/labels", response_model=LabelClassificationResponse)
+    def classify_labels(request: LabelClassificationRequest) -> LabelClassificationResponse:
+        if client is None:
+            raise HTTPException(status_code=503, detail="OpenAI is not configured")
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                request.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        with classification_cache_lock:
+            cached = classification_response_cache.get(request.idempotencyKey)
+            if cached is not None:
+                if cached[0] != fingerprint:
+                    raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "ai_service_classification_cache_hit",
+                    import_id=request.importId,
+                    ai_request_id=request.requestId,
+                )
+                return cached[1]
+            pending = classification_in_flight.get(request.idempotencyKey)
+            if pending is None:
+                pending = _ClassificationInFlight(
+                    fingerprint=fingerprint,
+                    completion=Event(),
+                )
+                classification_in_flight[request.idempotencyKey] = pending
+                owns_request = True
+            else:
+                if pending.fingerprint != fingerprint:
+                    raise HTTPException(status_code=409, detail="Idempotency key payload mismatch")
+                owns_request = False
+        if not owns_request:
+            if not pending.completion.wait(timeout=15):
+                raise HTTPException(status_code=503, detail="Classification is still running")
+            with classification_cache_lock:
+                cached = classification_response_cache.get(request.idempotencyKey)
+                failure_status_code = pending.failure_status_code
+                failure_detail = pending.failure_detail
+            if cached is not None:
+                return cached[1]
+            if failure_status_code is not None:
+                raise HTTPException(
+                    status_code=failure_status_code,
+                    detail=failure_detail,
+                )
+            raise HTTPException(status_code=503, detail="Classification did not complete")
+
+        try:
+            response = client.responses.parse(
+                model=configured_model,
+                instructions=LABEL_CLASSIFICATION_INSTRUCTIONS,
+                input=json.dumps(
+                    {
+                        "locale": request.locale,
+                        "labels": [item.model_dump(mode="json") for item in request.labels],
+                    },
+                    ensure_ascii=False,
+                ),
+                text_format=LabelClassificationContent,
+                reasoning={"effort": "low", "context": "current_turn"},
+                store=False,
+            )
+            content = response.output_parsed
+            if content is None:
+                raise ValueError("OpenAI response did not contain parsed output")
+            content = LabelClassificationContent.model_validate(content)
+            result = LabelClassificationResponse(
+                **request.model_dump(
+                    mode="json",
+                    include={
+                        "schemaVersion",
+                        "contractVersion",
+                        "promptVersion",
+                        "requestId",
+                        "idempotencyKey",
+                        "importId",
+                        "locale",
+                    },
+                ),
+                **content.model_dump(mode="json"),
+            )
+        except (ValidationError, ValueError) as exc:
+            with classification_cache_lock:
+                pending.failure_status_code = 422
+                pending.failure_detail = {"code": "invalid_classification_response"}
+                classification_in_flight.pop(request.idempotencyKey, None)
+                pending.completion.set()
+            log_event(
+                logger,
+                logging.WARNING,
+                "ai_service_classification_rejected",
+                import_id=request.importId,
+                ai_request_id=request.requestId,
+                exception_type=type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_classification_response"},
+            ) from exc
+        except Exception as exc:
+            with classification_cache_lock:
+                pending.failure_status_code = 502
+                pending.failure_detail = "AI classification failed"
+                classification_in_flight.pop(request.idempotencyKey, None)
+                pending.completion.set()
+            log_event(
+                logger,
+                logging.ERROR,
+                "ai_service_classification_failed",
+                import_id=request.importId,
+                ai_request_id=request.requestId,
+                exception_type=type(exc).__name__,
+            )
+            raise HTTPException(status_code=502, detail="AI classification failed") from exc
+
+        with classification_cache_lock:
+            if len(classification_response_cache) >= 512:
+                classification_response_cache.pop(next(iter(classification_response_cache)))
+            classification_response_cache[request.idempotencyKey] = (fingerprint, result)
+            classification_in_flight.pop(request.idempotencyKey, None)
+            pending.completion.set()
+        log_event(
+            logger,
+            logging.INFO,
+            "ai_service_classification_finished",
+            import_id=request.importId,
+            ai_request_id=request.requestId,
+            group_count=len(result.groups),
+        )
+        return result
+
     return app
 
 
 app = create_app()
 
 
-__all__ = ["INTERPRETATION_INSTRUCTIONS", "InterpretationContent", "app", "create_app"]
+__all__ = [
+    "INTERPRETATION_INSTRUCTIONS",
+    "LABEL_CLASSIFICATION_INSTRUCTIONS",
+    "InterpretationContent",
+    "LabelClassificationContent",
+    "app",
+    "create_app",
+]

@@ -281,6 +281,20 @@ def decide_candidate(
     )
 
 
+@api.post("/candidates/{candidate_id}/split")
+def split_candidate_group(
+    candidate_id: str,
+    user_id: UserId,
+    data: Data,
+    analyses: Analyses,
+) -> dict[str, Any]:
+    return _mutation_result(
+        data.split_candidate_group(user_id, candidate_id),
+        user_id,
+        analyses,
+    )
+
+
 @api.get("/preferences")
 def get_preferences(user_id: UserId, data: Data) -> dict[str, Any]:
     return data.get_preferences(user_id)

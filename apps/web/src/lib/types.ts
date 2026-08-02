@@ -364,6 +364,27 @@ export interface InstallmentPlan {
   status?: string;
 }
 
+export type LabelEntityKind =
+  | "CLIENT"
+  | "MERCHANT"
+  | "PLATFORM"
+  | "CARD_PAYMENT"
+  | "OTHER";
+
+export type LabelCategoryHint =
+  | "RECEIVABLE"
+  | "CARD_BILL"
+  | "INSTALLMENT_PAYMENT"
+  | "RENT"
+  | "INSURANCE"
+  | "UTILITY"
+  | "LOAN_PAYMENT"
+  | "TAX"
+  | "SAVINGS"
+  | "DISCRETIONARY_EXPENSE"
+  | "OTHER_INFLOW"
+  | "OTHER_OUTFLOW";
+
 export interface ImportCandidate {
   candidate_id?: string;
   id?: string;
@@ -374,9 +395,22 @@ export interface ImportCandidate {
   counterparty_name?: string;
   amount?: number;
   confidence?: number;
+  status?: "PENDING" | "CONFIRMED" | "REJECTED" | "UNKNOWN";
   suggested_category?: string;
   occurrences?: number;
   evidence_transaction_ids?: string[];
+  classification_group?: {
+    source: "AI";
+    group_id: string;
+    normalized_name: string;
+    entity_kind: LabelEntityKind;
+    category_hint: LabelCategoryHint;
+    essential_hint: boolean | null;
+    confidence: "HIGH" | "MEDIUM" | "LOW";
+    reason: string;
+    labels: string[];
+    can_split: boolean;
+  };
   proposed_record?: {
     amount?: number;
     original_amount?: number;
@@ -410,7 +444,28 @@ export interface ImportResponse {
   recurring_income_candidates?: ImportCandidate[];
   fixed_expense_candidates?: ImportCandidate[];
   installment_candidates?: ImportCandidate[];
+  classification_status?:
+    | "SUCCEEDED"
+    | "REJECTED"
+    | "FAILED"
+    | "NOT_REQUESTED";
+  classification_summary?: {
+    source: "AI" | "AI_SHADOW" | "DETERMINISTIC_FALLBACK";
+    applied: boolean;
+    original_label_count: number;
+    grouped_entity_count: number;
+    merged_label_count: number;
+    user_split_group_count?: number;
+  };
   message?: string;
+}
+
+export interface CandidateSplitResponse {
+  split: true;
+  candidate_id: string;
+  candidates: ImportCandidate[];
+  revision: string;
+  analysis_required: true;
 }
 
 export interface AnalysisResponse {

@@ -18,7 +18,7 @@ import hashlib
 import io
 import statistics
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -339,10 +339,26 @@ class CSVImportResult:
         }
 
 
+@dataclass(slots=True)
+class TransactionGroup:
+    """Transactions that share one deterministic or validated AI label identity."""
+
+    direction: str
+    key: str
+    transactions: list[dict[str, Any]]
+    classification: dict[str, Any] | None = None
+
+
 class CSVFinancialDataAdapter:
     """Parse and normalize a strict FlowGuard CSV."""
 
-    def parse(self, content: bytes | str) -> CSVImportResult:
+    def parse(
+        self,
+        content: bytes | str,
+        *,
+        group_transactions: Callable[[list[dict[str, Any]]], list[TransactionGroup] | None]
+        | None = None,
+    ) -> CSVImportResult:
         text = self._decode(content)
         reader = csv.DictReader(io.StringIO(text), strict=True)
         if reader.fieldnames is None:
@@ -449,7 +465,8 @@ class CSVFinancialDataAdapter:
             seen[identity] = normalized
             getattr(result, KIND_TO_COLLECTION[record_type]).append(normalized)
 
-        result.candidates.extend(self._detect_candidates(result.transactions))
+        groups = group_transactions(result.transactions) if group_transactions else None
+        result.candidates.extend(self._detect_candidates(result.transactions, groups=groups))
         result.data_quality_notices.extend(self._quality_notices(result, is_wide=is_wide))
         return result
 
@@ -642,8 +659,10 @@ class CSVFinancialDataAdapter:
                 )
             record["status"] = status
 
-    def _detect_candidates(self, transactions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        candidates: list[dict[str, Any]] = []
+    @staticmethod
+    def deterministic_grouping(transactions: list[dict[str, Any]]) -> list[TransactionGroup]:
+        """Preserve the original exact-label grouping as the mandatory fallback."""
+
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for transaction in transactions:
             label = transaction.get("counterparty_name") or transaction.get("description")
@@ -651,6 +670,23 @@ class CSVFinancialDataAdapter:
                 grouped[(transaction["direction"], str(label).strip().casefold())].append(
                     transaction
                 )
+        return [
+            TransactionGroup(
+                direction=direction,
+                key=normalized_label,
+                transactions=group,
+            )
+            for (direction, normalized_label), group in sorted(grouped.items())
+        ]
+
+    def _detect_candidates(
+        self,
+        transactions: list[dict[str, Any]],
+        *,
+        groups: list[TransactionGroup] | None = None,
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for transaction in transactions:
             months = transaction.get("installment_months")
             if isinstance(months, int) and months > 1:
                 candidates.append(
@@ -667,8 +703,15 @@ class CSVFinancialDataAdapter:
                     )
                 )
 
-        for (direction, _), group in sorted(grouped.items()):
-            ordered = sorted(group, key=lambda item: item["occurred_at"])
+        selected_groups = (
+            groups if groups is not None else self.deterministic_grouping(transactions)
+        )
+        for transaction_group in selected_groups:
+            direction = transaction_group.direction
+            ordered = sorted(
+                transaction_group.transactions,
+                key=lambda item: item["occurred_at"],
+            )
             minimum_count = 3 if direction == "INFLOW" else 2
             if len(ordered) < minimum_count or not self._has_recurring_spacing(ordered):
                 continue
@@ -679,10 +722,27 @@ class CSVFinancialDataAdapter:
                 continue
             candidate_type = "RECURRING_INCOME" if direction == "INFLOW" else "FIXED_EXPENSE"
             next_expected_date = self._next_expected_date(ordered)
-            counterparty_name = ordered[-1].get("counterparty_name")
+            classification = transaction_group.classification
+            counterparty_name = (
+                classification.get("normalized_name")
+                if classification is not None
+                else ordered[-1].get("counterparty_name")
+            )
             counterparty_id = self._derived_counterparty_id(
                 counterparty_name or ordered[-1].get("description") or "unknown"
             )
+            event_type = self._fixed_event_type(ordered[-1])
+            is_essential = self._looks_essential(ordered[-1])
+            if classification is not None and direction == "OUTFLOW":
+                category_hint = str(classification["category_hint"])
+                # Card bills and installment payments require a concrete card
+                # or plan reference for core cashflow deduplication. Keep those
+                # AI values as metadata until that structural link exists.
+                if category_hint not in {"CARD_BILL", "INSTALLMENT_PAYMENT"}:
+                    event_type = category_hint
+                essential_hint = classification.get("essential_hint")
+                if isinstance(essential_hint, bool):
+                    is_essential = essential_hint
             candidates.append(
                 self._candidate(
                     candidate_type,
@@ -697,12 +757,23 @@ class CSVFinancialDataAdapter:
                         "account_id": ordered[-1]["account_id"],
                         "destination_account_id": ordered[-1]["account_id"],
                         "expected_date": next_expected_date.isoformat(),
-                        "event_type": self._fixed_event_type(ordered[-1]),
-                        "is_essential": self._looks_essential(ordered[-1]),
+                        "event_type": event_type,
+                        "is_essential": is_essential,
                     },
+                    classification_group=classification,
                 )
             )
         return candidates
+
+    def detect_candidates(
+        self,
+        transactions: list[dict[str, Any]],
+        *,
+        groups: list[TransactionGroup] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Expose candidate detection for a user-requested AI-group split."""
+
+        return self._detect_candidates(transactions, groups=groups)
 
     @staticmethod
     def _next_expected_date(transactions: list[dict[str, Any]]) -> date:
@@ -764,12 +835,13 @@ class CSVFinancialDataAdapter:
         *,
         confidence: float,
         proposed: dict[str, Any],
+        classification_group: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         transaction_ids = [item["transaction_id"] for item in transactions]
         digest = hashlib.sha256(
             f"{candidate_type}:{':'.join(transaction_ids)}".encode()
         ).hexdigest()[:16]
-        return {
+        candidate = {
             "candidate_id": f"candidate-{digest}",
             "candidate_type": candidate_type,
             "status": "PENDING",
@@ -777,6 +849,9 @@ class CSVFinancialDataAdapter:
             "evidence_transaction_ids": transaction_ids,
             "proposed_record": proposed,
         }
+        if classification_group is not None:
+            candidate["classification_group"] = classification_group
+        return candidate
 
     def _quality_notices(self, result: CSVImportResult, *, is_wide: bool) -> list[dict[str, Any]]:
         notices: list[dict[str, Any]] = []

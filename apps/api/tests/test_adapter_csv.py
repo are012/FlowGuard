@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from flowguard.adapters import CSVFinancialDataAdapter, CSVImportError
+from flowguard.adapters import (
+    CSVFinancialDataAdapter,
+    CSVImportError,
+    TransactionGroup,
+)
 
 
 def test_minimum_transaction_csv_is_normalized_with_explicit_quality_notice() -> None:
@@ -78,6 +82,76 @@ txn-5,a,2026-02-05T09:00:00+09:00,OUTFLOW,500000,월세,건물주
         if notice["code"] == "USER_CONFIRMATION_REQUIRED"
     }
     assert confirmation_ids == {item["candidate_id"] for item in first.candidates}
+
+
+def test_validated_label_groups_feed_existing_deterministic_candidate_checks() -> None:
+    csv_text = (
+        "transaction_id,account_id,occurred_at,direction,amount,description,"
+        "counterparty_name\n"
+        "txn-1,a,2026-01-01T09:00:00+09:00,INFLOW,1000000,프로젝트,(주)디자인\n"
+        "txn-2,a,2026-02-01T09:00:00+09:00,INFLOW,990000,프로젝트,디자인\n"
+        "txn-3,a,2026-03-01T09:00:00+09:00,INFLOW,1010000,프로젝트,디자인(주)\n"
+    )
+    adapter = CSVFinancialDataAdapter()
+
+    deterministic = adapter.parse(csv_text)
+    classified = adapter.parse(
+        csv_text,
+        group_transactions=lambda transactions: [
+            TransactionGroup(
+                direction="INFLOW",
+                key="G1",
+                transactions=transactions,
+                classification={
+                    "source": "AI",
+                    "group_id": "G1",
+                    "normalized_name": "디자인",
+                    "entity_kind": "CLIENT",
+                    "category_hint": "RECEIVABLE",
+                    "essential_hint": None,
+                    "confidence": "HIGH",
+                    "reason": "법인격 표기만 다릅니다.",
+                    "labels": ["(주)디자인", "디자인", "디자인(주)"],
+                    "can_split": True,
+                },
+            )
+        ],
+    )
+
+    assert deterministic.candidates == []
+    assert len(classified.candidates) == 1
+    candidate = classified.candidates[0]
+    assert candidate["candidate_type"] == "RECURRING_INCOME"
+    assert candidate["proposed_record"]["counterparty_name"] == "디자인"
+    assert candidate["classification_group"]["can_split"] is True
+
+
+def test_deterministic_grouping_preserves_exact_label_fallback() -> None:
+    transactions = [
+        {
+            "transaction_id": "one",
+            "direction": "OUTFLOW",
+            "counterparty_name": " 카드사 ",
+        },
+        {
+            "transaction_id": "two",
+            "direction": "OUTFLOW",
+            "counterparty_name": "카드사",
+        },
+        {
+            "transaction_id": "three",
+            "direction": "OUTFLOW",
+            "counterparty_name": "카드사 자동이체",
+        },
+    ]
+
+    groups = CSVFinancialDataAdapter.deterministic_grouping(transactions)
+
+    assert [group.key for group in groups] == ["카드사", "카드사 자동이체"]
+    assert [[item["transaction_id"] for item in group.transactions] for group in groups] == [
+        ["one", "two"],
+        ["three"],
+    ]
 
 
 @pytest.mark.parametrize(

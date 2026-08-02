@@ -63,7 +63,7 @@
 | Web | Next.js 프로세스 | 독립 Web 컨테이너 |
 | API와 분석 | FastAPI 요청 안에서 `AnalysisOrchestrator` 동기 실행 | API와 durable worker 분리 |
 | 코어/MCP 도구 | MCP 계약과 같은 도구 구현을 API 프로세스에서 직접 호출; FastMCP 진입점 제공 | 별도 MCP 프로세스와 transport 연결 |
-| AI 해석 | 같은 Python distribution의 별도 FastAPI 프로세스, 단일 worker | 공유 멱등 저장소를 사용하는 독립 서비스 |
+| AI 분류·해석 | 같은 Python distribution의 별도 FastAPI 프로세스, 단일 worker | 공유 멱등 저장소를 사용하는 독립 서비스 |
 | 저장소 | Alembic 버전 관리 SQLite·자동 마이그레이션 테스트; PostgreSQL URL과 driver 경로 제공 | 검증된 PostgreSQL 배포·통합 테스트 |
 | 큐와 스케줄러 | 사용하지 않음 | Redis queue, lease, 정기 실행 |
 | 컨테이너 | Dockerfile과 Compose를 MVP 완료 조건에 포함하지 않음 | 운영 배포 방식 확정 후 구성 |
@@ -537,6 +537,31 @@ ProtectedFund
 - source_reference_id
 
 중복 여부가 불확실한 경우 자동 삭제하지 않고 사용자 확인 대상으로 남긴다.
+
+## 6.5 반복 후보의 라벨 그룹핑
+
+반복 수입·고정지출 후보는 다음 순서로 탐지한다.
+
+1. 거래의 `counterparty_name` 또는 `description`에서 고유 라벨을 만든다.
+2. 기본값에서는 방향과 `strip().casefold()`한 라벨의 완전일치로 그룹핑한다.
+3. `FLOWGUARD_AI_CLASSIFICATION=on`이면 검증된 AI 라벨 그룹을 사용할 수 있다.
+4. 어떤 그룹을 사용하든 반복 간격 20~40일, 금액 중앙값 대비 10% 편차,
+   최소 발생 횟수(수입 3회·지출 2회)는 백엔드가 결정론적으로 검증한다.
+5. 할부 후보는 AI 힌트가 아니라 `installment_months > 1`인 기존 경로에서만 만든다.
+
+기존 완전일치 로직은 `deterministic_grouping()`에 보존하며 AI 미설정, 호출 실패,
+응답 거부 시 폴백으로 사용한다. `FLOWGUARD_AI_CLASSIFICATION`의 기본값과 `off`는 AI를
+호출하지 않고 기존 응답·후보·데이터 revision을 변경하지 않는다. `shadow`는 호출과
+감사 기록만 수행하며 후보에 적용하지 않고, `on`만 검증 성공 그룹을 적용한다.
+
+AI 그룹으로 만든 후보에는 분류 출처, 원 라벨, 카테고리·필수지출 제안을 표시한다.
+사용자는 확정 전에 카테고리·필수지출 여부를 수정하거나 그룹을 해제할 수 있으며,
+백엔드는 그룹 해제 시 해당 후보를 거부 상태로 바꾸고 같은 거래에
+`deterministic_grouping()`을 다시 적용한다. 그룹 해제 표식은 라벨 집합과 방향을
+기준으로 보존하여 이후 거래가 추가된 업로드에서도 같은 AI 그룹을 다시 적용하지
+않는다. 해제된 원래 후보는 다시 확정할 수 없고, 그룹 해제와 후보 확정은 같은 사용자
+revision 트랜잭션에서 선행 상태를 확인한다. 분류된 재업로드도 준비 시점의 revision을
+검증하며, 경합하면 최신 그룹 해제 표식을 다시 대조한 뒤 저장한다.
 
 ---
 
@@ -1452,6 +1477,121 @@ confirm_receivable
 - `reason`은 사용자에게 노출될 수 있는 설명이므로 비속어·과장·허위 진술을 포함하지 않는다.
 - `userMessage`는 1~2문장 내로 간결하게 작성한다.
 
+### 20.1.5 라벨 분류 계약 (`POST /classify/labels`)
+
+라벨 분류는 해석 계약과 독립된 `schemaVersion: "1.2"`,
+`contractVersion: "1.2"`, `promptVersion: "classify-1"`을 사용한다. 기존
+`/interpret` 계약은 `1.1`을 유지한다.
+
+요청 예시는 다음과 같다.
+
+```json
+{
+  "schemaVersion": "1.2",
+  "contractVersion": "1.2",
+  "promptVersion": "classify-1",
+  "requestId": "ai-classify-opaque",
+  "idempotencyKey": "import-opaque:label-hash:contract-1.2:classify-1:ko-KR",
+  "importId": "import-opaque",
+  "locale": "ko-KR",
+  "labels": [
+    {
+      "labelId": "label-opaque-a",
+      "text": "디자인컴퍼니",
+      "direction": "INFLOW",
+      "occurrences": 3
+    }
+  ]
+}
+```
+
+각 `labels` 항목에 허용되는 필드는 `labelId`, `text`, `direction`, `occurrences`뿐이다.
+금액, 거래일, 계좌, 잔액, 거래 ID는 포함하지 않는다. 라벨 본문에 포함된 아라비아
+숫자, 한국어·영어 금액 및 날짜 표현은 `<NUM>`으로, 원천 식별자는 다른 문자열에
+붙어 있어도 `<ID>`로 치환한다.
+
+응답의 그룹 필드는 다음과 같다.
+
+```json
+{
+  "schemaVersion": "1.2",
+  "contractVersion": "1.2",
+  "promptVersion": "classify-1",
+  "requestId": "ai-classify-opaque",
+  "idempotencyKey": "import-opaque:label-hash:contract-1.2:classify-1:ko-KR",
+  "importId": "import-opaque",
+  "locale": "ko-KR",
+  "groups": [
+    {
+      "groupId": "group-client",
+      "labelIds": ["label-opaque-a"],
+      "normalizedName": "디자인컴퍼니",
+      "entityKind": "CLIENT",
+      "categoryHint": "RECEIVABLE",
+      "essentialHint": null,
+      "confidence": "HIGH",
+      "reason": "동일 상호로 판단되는 표기입니다."
+    }
+  ],
+  "ungrouped": []
+}
+```
+
+`entityKind` 허용값은 다음과 같다.
+
+```text
+CLIENT
+MERCHANT
+PLATFORM
+CARD_PAYMENT
+OTHER
+```
+
+`categoryHint`는 `EventType`과 같은 다음 12개 값만 허용한다.
+
+```text
+RECEIVABLE
+CARD_BILL
+INSTALLMENT_PAYMENT
+RENT
+INSURANCE
+UTILITY
+LOAN_PAYMENT
+TAX
+SAVINGS
+DISCRETIONARY_EXPENSE
+OTHER_INFLOW
+OTHER_OUTFLOW
+```
+
+`confidence`는 `LOW`, `MEDIUM`, `HIGH` 중 하나다. `INFLOW` 그룹은
+`RECEIVABLE|OTHER_INFLOW`, `OUTFLOW` 그룹은 나머지 지출 힌트만 허용한다.
+`categoryHint`는 기존 후보 유형을 바꾸지 않는다. 특히 `CARD_BILL`과
+`INSTALLMENT_PAYMENT`는 실제 `card_id` 또는 `installment_plan_id` 연결 없이는
+확정 이벤트의 유형으로 승격하지 않는다.
+
+백엔드는 다음 중 하나라도 위반하면 응답 전체를 `REJECTED`하고 완전일치 그룹으로
+폴백한다.
+
+- 요청에 없는 `labelId`
+- 그룹·미분류 목록 사이의 중복 `labelId`
+- 어느 쪽에도 포함되지 않은 요청 라벨
+- 서로 다른 방향이 섞인 그룹
+- 닫힌 열거형 또는 방향과 맞지 않는 `categoryHint`
+- `normalizedName`·`reason`의 숫자 표현
+- 계약 식별자 에코 불일치
+
+연결·타임아웃·HTTP 실패는 `FAILED`, 계약·검증 실패는 `REJECTED`, 검증 성공은
+`SUCCEEDED`로 기록한다. 이 상태는 금융 분석 상태와 별개이며 어느 실패도 CSV
+가져오기를 중단시키지 않는다.
+
+같은 사용자·모드·라벨 집합·스키마·계약·프롬프트·locale은 안정적인 `importId`를
+사용한다. 한 실행의
+네트워크 재시도와 동시 요청은 같은 `idempotencyKey`를 공유하고, 성공 결과는 이후
+동일 업로드에서 재사용한다. `FAILED` 또는 `REJECTED` 뒤 사용자가 다시 업로드하면 이전
+`classification_id`에서 파생한 `:retry-<classification_id>` 접미사의 새 시도 키를
+사용해 일시 장애가 영구 고착되지 않게 한다.
+
 ## 20.2 공통 규칙
 
 - 모든 도구 입력에 `snapshot_id` 또는 이를 추적할 수 있는 식별자를 포함한다.
@@ -1915,6 +2055,47 @@ completed_at
 
 `idempotency_key`에는 unique constraint를 둔다.
 
+## 22.2 AI 라벨 분류 실행 저장 모델
+
+```text
+ai_classification_runs
+```
+
+최소 컬럼:
+
+```text
+classification_id
+user_id
+import_id
+request_id
+idempotency_key
+label_set_hash
+schema_version
+contract_version
+prompt_version
+mode
+status
+applied
+attempt_count
+fallback_used
+latency_ms
+model_name
+label_count
+group_count
+merged_label_count
+response_payload
+error_code
+created_at
+completed_at
+```
+
+`idempotency_key`에는 unique constraint를 둔다. 원문 라벨, 거래 금액, 날짜는 감사
+테이블에 저장하지 않는다. `off` 또는 분류 클라이언트 미구성 상태에서는 행을 만들지
+않으며 행 없음을 `NOT_REQUESTED`로 해석한다. `response_payload`는 검증에 성공한
+응답만 저장한다. 완료 상태는 변경할 수 없고, `SUCCEEDED`에는 검증 응답과 전체 라벨을
+포괄하는 그룹 수가 반드시 있어야 한다. `on`의 `applied=true` 완료와 후보·거래 저장은
+같은 데이터베이스 트랜잭션에서 커밋한다.
+
 ---
 
 # 23. 실패 처리
@@ -2076,6 +2257,9 @@ ANALYSIS_FAILED
 - 정책 검증 실패 대응안은 최종 추천이 될 수 없다.
 - 사용자 승인 없이 가상 적용 이상의 행동을 수행하지 않는다.
 - 분석 실패를 안전 상태로 표시하지 않는다.
+- AI 분류가 실패하거나 거부되면 완전일치 그룹핑 결과와 금융 데이터 revision은
+  정상적으로 유지된다.
+- AI 라벨 분류 요청에는 금액·날짜·계좌·거래 ID가 포함되지 않는다.
 
 ---
 
@@ -2084,6 +2268,8 @@ ANALYSIS_FAILED
 MVP 핵심 구현은 다음 조건을 충족해야 한다.
 
 - 합성 CSV를 표준 금융 데이터로 정규화할 수 있다.
+- 선택적 AI 라벨 그룹을 검증한 뒤 기존 반복 후보 규칙에 적용하고, 실패 시
+  `deterministic_grouping()`으로 폴백할 수 있다.
 - 금융 스냅숏을 생성할 수 있다.
 - 13주 현금흐름을 재현 가능하게 계산할 수 있다.
 - 결제계좌 부족과 전체 유동성 부족을 구분할 수 있다.

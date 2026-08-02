@@ -15,6 +15,13 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from flowguard.api import router
+from flowguard.config import (
+    AI_CONNECT_TIMEOUT_SECONDS,
+    AI_DEFAULT_LOCALE,
+    AI_MAX_RETRIES,
+    AI_RESPONSE_TIMEOUT_SECONDS,
+    AI_TOTAL_TIMEOUT_SECONDS,
+)
 from flowguard.observability import configure_logging, log_event
 from flowguard.rate_limit import (
     InMemoryRateLimiter,
@@ -22,8 +29,9 @@ from flowguard.rate_limit import (
     limiter_from_environment,
 )
 from flowguard.services.analysis import AnalysisOrchestrator
-from flowguard.services.data import DataService
+from flowguard.services.data import ClassificationMode, DataService, LabelClassifier
 from flowguard.services.errors import ServiceError
+from flowguard.services.label_group_validation import AILabelClassificationClient
 from flowguard.services.recommendations import RecommendationService
 from flowguard.services.reports import ReportQueryService
 from flowguard.services.tools import CoreToolService
@@ -37,6 +45,7 @@ def create_app(
     repository: FlowGuardRepository | None = None,
     *,
     rate_limiter: InMemoryRateLimiter | None = None,
+    classification_client: LabelClassifier | None = None,
 ) -> FastAPI:
     configure_logging()
     app = FastAPI(
@@ -52,8 +61,38 @@ def create_app(
     }
     repository = repository or FlowGuardRepository(create_schema=auto_create_schema)
     tools = CoreToolService(repository)
+    classification_mode = _classification_mode()
+    if classification_mode != "off" and classification_client is None:
+        classification_client = AILabelClassificationClient(
+            base_url=os.getenv("FLOWGUARD_AI_SERVER_URL", "http://localhost:8001"),
+            connect_timeout_seconds=float(
+                os.getenv(
+                    "FLOWGUARD_AI_CONNECT_TIMEOUT_SECONDS",
+                    str(AI_CONNECT_TIMEOUT_SECONDS),
+                )
+            ),
+            read_timeout_seconds=float(
+                os.getenv(
+                    "FLOWGUARD_AI_RESPONSE_TIMEOUT_SECONDS",
+                    str(AI_RESPONSE_TIMEOUT_SECONDS),
+                )
+            ),
+            total_timeout_seconds=float(
+                os.getenv(
+                    "FLOWGUARD_AI_TOTAL_TIMEOUT_SECONDS",
+                    str(AI_TOTAL_TIMEOUT_SECONDS),
+                )
+            ),
+            max_retries=int(os.getenv("FLOWGUARD_AI_MAX_RETRIES", str(AI_MAX_RETRIES))),
+        )
     app.state.repository = repository
-    app.state.data_service = DataService(repository)
+    app.state.data_service = DataService(
+        repository,
+        classification_mode=classification_mode,
+        classification_client=classification_client,
+        classification_locale=os.getenv("FLOWGUARD_AI_LOCALE", AI_DEFAULT_LOCALE),
+        classification_model_name=os.getenv("FLOWGUARD_AI_MODEL_NAME") or None,
+    )
     app.state.analysis_service = AnalysisOrchestrator(
         repository,
         tools=tools,
@@ -88,6 +127,20 @@ def create_app(
     app.include_router(router)
     _register_error_handlers(app)
     return app
+
+
+def _classification_mode() -> ClassificationMode:
+    configured = os.getenv("FLOWGUARD_AI_CLASSIFICATION", "off").strip().lower()
+    if configured in {"shadow", "on"}:
+        return configured
+    if configured not in {"", "off"}:
+        log_event(
+            logger,
+            logging.WARNING,
+            "invalid_ai_classification_mode",
+            configured_mode=configured,
+        )
+    return "off"
 
 
 def _register_error_handlers(app: FastAPI) -> None:

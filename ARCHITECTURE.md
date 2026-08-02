@@ -20,7 +20,7 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 |---|---|---|
 | Web | Next.js 프로세스 | `flowguard-web` 컨테이너 |
 | API/분석 | FastAPI 요청 안에서 동기 분석 | API와 durable worker 분리 |
-| AI 해석 | 같은 Python distribution의 별도 FastAPI 진입점, 단일 worker | 공유 멱등 저장소 기반 다중 worker 서비스 |
+| AI 분류·해석 | 같은 Python distribution의 별도 FastAPI 진입점, 단일 worker | 공유 멱등 저장소 기반 다중 worker 서비스 |
 | 코어/MCP 도구 | 일곱 도구와 FastMCP 진입점 구현; 분석 경로는 동일 구현을 in-process 호출 | 별도 MCP 프로세스와 transport |
 | 저장소 | Alembic 버전 관리 SQLite·마이그레이션 테스트 완료; PostgreSQL 설정 경로 제공 | 검증된 PostgreSQL 배포·통합 테스트 |
 | 큐/스케줄러 | 없음 | Redis queue, lease, 정기 실행 |
@@ -119,12 +119,12 @@ FlowGuard는 KB·토스의 자산관리 서비스처럼 **금융데이터가 갱
 │  13주 현금흐름 재계산                                         │
 │  적용 전후 비교 · 반동위험 검사 · 금융정책 검증               │
 └──────────────────────────────┬────────────────────────────────┘
-                               │ 최소 facts/evidence/actionCandidates
+                               │ 최소 labels 또는 facts/evidence/actionCandidates
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
-│                 AI Interpretation Service                     │
+│               AI Classification / Interpretation Service      │
 │                                                               │
-│  OpenAI 호출 · 후보 순위화 · 설명 생성                        │
+│  최소 라벨 그룹 제안 · 후보 순위화 · 설명 생성                │
 │  DB 직접 접근 없음 · MCP 직접 호출 없음                       │
 │  request/response 계약 검증 · 타임아웃 · 재시도 · 폴백        │
 └──────────────────────────────┬────────────────────────────────┘
@@ -172,7 +172,14 @@ MVP에서는 사용자가 CSV를 새로 업로드하거나 금융정보를 수�
 ```text
 CSV 업로드 또는 데이터 수정
         ↓
-금융데이터 정규화 및 저장
+금융데이터 정규화
+        ↓
+선택적 AI 라벨 그룹 제안 (`off|shadow|on`)
+        ↓
+계약 검증 후 기존 반복주기·금액편차 규칙 적용
+실패 시 `deterministic_grouping()` 폴백
+        ↓
+금융데이터와 사용자 확인 후보 저장
         ↓
 최초 설정의 환경설정·후보 결정을 한 번에 확정
         ↓
@@ -314,10 +321,13 @@ Safe-to-Spend
 
 - 코어 도구와 FastMCP 진입점은 백엔드가 소유합니다. 현재 분석 경로는
   `CoreToolService`를 in-process로 호출합니다.
-- AI Interpretation Service는 같은 Python distribution을 사용하지만 포트와
+- AI Classification / Interpretation Service는 같은 Python distribution을 사용하지만 포트와
   환경변수가 분리된 별도 FastAPI 프로세스로 실행합니다.
-- AI 서비스는 백엔드가 전달한 `facts`, `evidence`, `actionCandidates`만 받아
-  OpenAI를 호출하고 순위화·설명 생성만 수행합니다.
+- 분류 경로는 숫자를 비식별화한 `labelId`, `text`, `direction`, `occurrences`만 받아
+  같은 거래 대상을 가리키는 표기 그룹을 제안합니다. 금액·날짜·계좌·거래 ID는 받지
+  않습니다.
+- 해석 경로는 백엔드가 전달한 `facts`, `evidence`, `actionCandidates`만 받아
+  순위화·설명 생성을 수행합니다.
 - OpenAI API 키는 AI 서비스 프로세스만 읽습니다.
 - AI 서비스는 DB나 MCP 도구에 접근하지 않습니다.
 - SQLite가 기본 저장소이며 Redis queue와 정기 scheduler는 사용하지 않습니다.
@@ -358,6 +368,24 @@ interpretation_status
 ```
 
 즉, AI 실패는 금융 분석 전체를 `FAILED`로 바꾸지 않습니다.
+
+CSV 업로드의 라벨 분류 상태도 별도로 관리합니다.
+
+```text
+classification_status
+→ NOT_REQUESTED | SUCCEEDED | REJECTED | FAILED
+```
+
+기본값 `off`에서는 분류 요청과 감사 행을 만들지 않아 기존 업로드 응답과 revision을
+그대로 유지합니다. `shadow`는 검증 결과를 `ai_classification_runs`에 기록하지만 후보에
+적용하지 않고, `on`의 검증 성공만 적용합니다. `REJECTED`·`FAILED`는 모두 기존
+완전일치 그룹핑으로 돌아갑니다. 사용자는 적용된 AI 그룹을 확인 화면에서 해제할 수
+있으며, 이때 백엔드는 해당 거래에 완전일치 그룹핑을 다시 적용하고 라벨 기반 해제
+표식을 이후 업로드에도 유지합니다. 그룹 해제·후보 확정은 사용자 revision 행을 잠근
+단일 트랜잭션으로 직렬화합니다. `on`의 후보 저장과 `applied=true` 감사 완료도 같은
+트랜잭션이므로 둘 중 하나만 반영되는 상태가 생기지 않습니다. 분류된 재업로드는 준비
+시점의 revision을 저장 직전에 비교하고, 경합 시 최신 후보를 다시 대조하므로 동시에
+저장된 사용자 그룹 해제 표식을 오래된 업로드가 덮어쓰지 않습니다.
 
 ---
 
@@ -795,7 +823,7 @@ revision이 최신인 리포트만 승격
 
 > 아래 일곱 컨테이너는 현재 저장소에서 실행·검증된 배포 구성이 아니라 운영 확장을
 > 위한 목표안입니다. 현재 MVP에는 Dockerfile과 Compose가 없으며, 구현된 로컬 실행
-> 구성은 Web, 동기 분석과 코어 도구를 포함한 API, 선택적 AI Interpretation Service와
+> 구성은 Web, 동기 분석과 코어 도구를 포함한 API, 선택적 AI 분류·해석 Service와
 > SQLite입니다. 자동 검증 경계는 0절을 따르며 Docker 사용 여부와 배포 방식은
 > `SPECIFICATION.md` 27절의 Open Decision으로 유지합니다.
 
@@ -816,7 +844,7 @@ flowguard-redis
 | `flowguard-web`      | Next.js 사용자 화면        |
 | `flowguard-api`      | FastAPI, 조회·수정·승인 API |
 | `flowguard-worker`   | 스냅숏·분석 작업·후보 생성·정기 실행 |
-| `flowguard-ai-service` | OpenAI 호출·설명 생성·후보 순위화 |
+| `flowguard-ai-service` | OpenAI 호출·라벨 그룹 제안·설명 생성·후보 순위화 |
 | `flowguard-mcp`      | 백엔드 소유 코어/MCP 도구      |
 | `flowguard-postgres` | 원천 데이터·분석 결과·감사 로그    |
 | `flowguard-redis`    | 작업 큐·분석 진행상태·에이전트 상태  |
@@ -836,7 +864,12 @@ Application API
   ├─ SQLite
   ├─ 동기 Analysis Orchestrator
   ├─ Deterministic Financial Core
-  └─ in-process CoreToolService
+  ├─ in-process CoreToolService
+  └─ 라벨 계약 검증·결정론적 그룹 폴백
+        ↓
+선택적 AI Label Classification (업로드 시, 별도 프로세스)
+        ↓
+분류 감사 기록 및 사용자 확인 후보 저장 (SQLite)
         ↓
 기준 분석 리포트 저장 (SQLite)
         ↓

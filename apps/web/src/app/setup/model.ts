@@ -86,3 +86,20 @@ export function candidatesFrom(response: ImportResponse) {
       return true;
     });
 }
+
+export function replaceCandidate(
+  candidates: ImportCandidate[],
+  candidateId: string,
+  replacements: ImportCandidate[],
+) {
+  const index = candidates.findIndex(
+    (candidate) =>
+      candidate.candidate_id === candidateId || candidate.id === candidateId,
+  );
+  if (index < 0) return candidates;
+  return [
+    ...candidates.slice(0, index),
+    ...replacements,
+    ...candidates.slice(index + 1),
+  ];
+}

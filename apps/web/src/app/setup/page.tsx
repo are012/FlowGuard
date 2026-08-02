@@ -10,6 +10,7 @@ import type {
   Account,
   AnalysisResponse,
   Card,
+  CandidateSplitResponse,
   Counterparty,
   DemoResetResponse,
   ImportCandidate,
@@ -28,6 +29,7 @@ import {
   newCounterpartyId,
   promotionFields,
   proposedValue,
+  replaceCandidate,
   SAMPLE_ANALYSIS_AS_OF,
   SAMPLE_FILE_NAME,
   valueAsString,
@@ -42,6 +44,7 @@ export default function SetupPage() {
   const [incomeType, setIncomeType] = useState("MIXED");
   const [minimumReserve, setMinimumReserve] = useState("");
   const [importResult, setImportResult] = useState<ImportResponse>();
+  const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [reviews, setReviews] = useState<Record<string, ReviewValue>>({});
   const [candidateDetails, setCandidateDetails] = useState<
     Record<string, CandidateDetails>
@@ -51,16 +54,18 @@ export default function SetupPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [splitErrors, setSplitErrors] = useState<Record<string, string>>({});
+  const [splittingCandidates, setSplittingCandidates] = useState<
+    Record<string, boolean>
+  >({});
+  const splitInFlightRef = useRef(new Set<string>());
   const accountsRemote =
     useRemote<ListResponse<Account>>("/api/v1/accounts");
   const cardsRemote = useRemote<ListResponse<Card>>("/api/v1/cards");
   const counterpartiesRemote =
     useRemote<ListResponse<Counterparty>>("/api/v1/counterparties");
 
-  const candidates = useMemo(
-    () => (importResult ? candidatesFrom(importResult) : []),
-    [importResult],
-  );
+  const splitBusy = Object.keys(splittingCandidates).length > 0;
   const accounts = useMemo(
     () => listFrom<Account>(accountsRemote.data),
     [accountsRemote.data],
@@ -180,9 +185,11 @@ export default function SetupPage() {
     setError(undefined);
     setNotice(undefined);
     setImportResult(undefined);
+    setCandidates([]);
     setAnalysisResult(undefined);
     setReviews({});
     setCandidateDetails({});
+    setSplitErrors({});
 
     const formData = new FormData();
     formData.append("file", file);
@@ -195,7 +202,20 @@ export default function SetupPage() {
         "/api/v1/imports/transactions",
         { method: "POST", body: formData },
       );
+      const importedCandidates = candidatesFrom(response);
       setImportResult(response);
+      setCandidates(importedCandidates);
+      if (response.classification_summary) {
+        setReviews(
+          Object.fromEntries(
+            importedCandidates.flatMap((candidate, index) =>
+              candidate.status && candidate.status !== "PENDING"
+                ? [[candidateKey(candidate, index), candidate.status]]
+                : [],
+            ),
+          ),
+        );
+      }
       accountsRemote.reload();
       cardsRemote.reload();
       counterpartiesRemote.reload();
@@ -206,8 +226,81 @@ export default function SetupPage() {
     }
   }
 
+  async function splitCandidate(candidate: ImportCandidate, key: string) {
+    const candidateId = candidate.candidate_id || candidate.id;
+    if (!candidateId || splitInFlightRef.current.has(candidateId)) return;
+
+    splitInFlightRef.current.add(candidateId);
+    setSplittingCandidates((current) => ({ ...current, [candidateId]: true }));
+    setSplitErrors((current) => {
+      const next = { ...current };
+      delete next[candidateId];
+      return next;
+    });
+
+    try {
+      const response = await apiRequest<CandidateSplitResponse>(
+        `/api/v1/candidates/${encodeURIComponent(candidateId)}/split`,
+        { method: "POST" },
+      );
+      if (
+        !response.split ||
+        response.candidate_id !== candidateId ||
+        !Array.isArray(response.candidates)
+      ) {
+        throw new Error("그룹 해제 결과를 확인하지 못했습니다.");
+      }
+
+      setCandidates((current) =>
+        replaceCandidate(current, candidateId, response.candidates),
+      );
+      setImportResult((current) =>
+        current
+          ? {
+              ...current,
+              revision: response.revision,
+              analysis_required: response.analysis_required,
+              classification_summary: current.classification_summary
+                ? {
+                    ...current.classification_summary,
+                    user_split_group_count:
+                      (current.classification_summary.user_split_group_count ||
+                        0) + 1,
+                  }
+                : undefined,
+            }
+          : current,
+      );
+      setReviews((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setCandidateDetails((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    } catch (caught) {
+      setSplitErrors((current) => ({
+        ...current,
+        [candidateId]:
+          caught instanceof Error
+            ? caught.message
+            : "그룹을 해제하지 못했습니다.",
+      }));
+    } finally {
+      splitInFlightRef.current.delete(candidateId);
+      setSplittingCandidates((current) => {
+        const next = { ...current };
+        delete next[candidateId];
+        return next;
+      });
+    }
+  }
+
   async function startAnalysis() {
-    if (!importResult) return;
+    if (!importResult || splitInFlightRef.current.size > 0) return;
     const confirmations = candidates.map((candidate, index) => {
       const key = candidateKey(candidate, index);
       const decision = reviews[key] || "UNKNOWN";
@@ -332,9 +425,11 @@ export default function SetupPage() {
       setFile(undefined);
       if (fileInputRef.current) fileInputRef.current.value = "";
       setImportResult(undefined);
+      setCandidates([]);
       setAnalysisResult(undefined);
       setReviews({});
       setCandidateDetails({});
+      setSplitErrors({});
       accountsRemote.reload();
       cardsRemote.reload();
       counterpartiesRemote.reload();
@@ -360,7 +455,7 @@ export default function SetupPage() {
           <button
             className="button button-secondary"
             data-testid="demo-reset"
-            disabled={busy}
+            disabled={busy || splitBusy}
             onClick={resetDemo}
             type="button"
           >
@@ -379,7 +474,7 @@ export default function SetupPage() {
         <div className="setup-main">
           {!importResult && (
             <CsvUploadStep
-              busy={busy}
+              busy={busy || splitBusy}
               error={error}
               file={file}
               fileInputRef={fileInputRef}
@@ -416,8 +511,12 @@ export default function SetupPage() {
                 setReviews((current) => ({ ...current, [key]: value }))
               }
               onUpdateCandidateDetail={updateCandidateDetail}
+              onSplit={splitCandidate}
               resolveCandidateDetails={resolvedCandidateDetails}
               reviews={reviews}
+              splitBusy={splitBusy}
+              splitErrors={splitErrors}
+              splittingCandidates={splittingCandidates}
             />
           )}
 

@@ -288,6 +288,65 @@
   padding: 16px 18px;
 }
 
+.classification-summary-copy,
+.classification-summary-copy strong {
+  display: block;
+}
+
+.classification-summary-copy strong {
+  margin-bottom: 2px;
+}
+
+.candidate-classification {
+  align-items: center;
+  background: var(--blue-soft);
+  border-radius: 13px;
+  display: grid;
+  gap: 14px;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px 14px;
+}
+
+.candidate-classification-copy > span,
+.candidate-classification-copy > strong,
+.candidate-classification-copy > small {
+  display: block;
+}
+
+.candidate-classification-copy > span {
+  color: var(--blue);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.candidate-classification-copy > strong {
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.candidate-classification-copy > p,
+.candidate-classification-copy > small {
+  color: var(--ink-soft);
+  font-size: 9px;
+  margin: 3px 0 0;
+}
+
+.candidate-classification-copy > small {
+  line-height: 1.5;
+}
+
+.candidate-split-button {
+  white-space: nowrap;
+}
+
+.candidate-split-error {
+  color: var(--red);
+  font-size: 9px;
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .candidate-confirmation {
   border-top: 1px solid var(--line);
   grid-column: 1 / -1;
@@ -781,6 +840,11 @@
     grid-template-columns: 1fr;
     gap: 12px;
     padding: 14px;
+  }
+
+  .candidate-classification {
+    align-items: stretch;
+    grid-template-columns: 1fr;
   }
 
   .candidate-detail-grid {

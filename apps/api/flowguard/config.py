@@ -24,6 +24,12 @@ AI_RESPONSE_TIMEOUT_SECONDS = 10.0
 AI_TOTAL_TIMEOUT_SECONDS = 15.0
 AI_MAX_RETRIES = 1
 
+# Label classification is a separate endpoint contract. Do not couple these
+# versions to the existing /interpret 1.1 compatibility boundary.
+AI_CLASSIFICATION_SCHEMA_VERSION = "1.2"
+AI_CLASSIFICATION_CONTRACT_VERSION = "1.2"
+AI_CLASSIFICATION_PROMPT_VERSION = "classify-1"
+
 # SPECIFICATION.md section 27 leaves these values open. They are explicit and versioned here
 # so identical inputs remain reproducible until a future version deliberately changes them.
 MIN_COUNTERPARTY_HISTORY_COUNT = 3

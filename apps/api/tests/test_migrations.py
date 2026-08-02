@@ -57,6 +57,39 @@ def test_existing_current_schema_can_be_stamped_after_parity_check(tmp_path: Pat
     command.check(config)
 
 
+def test_classification_audit_migration_upgrades_and_downgrades_independently(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'classification-migration.db'}"
+    config = _config(database_url)
+
+    command.upgrade(config, "20260802_0001")
+    engine = create_engine(database_url)
+    assert "ai_classification_runs" not in inspect(engine).get_table_names()
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    assert "ai_classification_runs" in inspector.get_table_names()
+    assert {
+        "ix_ai_classification_runs_user_id",
+        "ix_ai_classification_runs_import_id",
+        "ix_ai_classification_runs_request_id",
+    }.issubset({item["name"] for item in inspector.get_indexes("ai_classification_runs")})
+    assert ("idempotency_key",) in {
+        tuple(item["column_names"])
+        for item in inspector.get_unique_constraints("ai_classification_runs")
+    }
+    engine.dispose()
+
+    command.downgrade(config, "20260802_0001")
+    engine = create_engine(database_url)
+    assert "ai_classification_runs" not in inspect(engine).get_table_names()
+    assert "current_records" in inspect(engine).get_table_names()
+    engine.dispose()
+
+
 def test_schema_parity_rejects_an_unversioned_database_with_drift(
     tmp_path: Path,
     capsys,

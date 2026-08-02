@@ -18,6 +18,7 @@ import type {
   Counterparty,
   ImportCandidate,
   ImportResponse,
+  LabelCategoryHint,
 } from "@/lib/types";
 
 import {
@@ -212,17 +213,36 @@ interface CandidateOptions {
   counterpartiesLoading: boolean;
 }
 
+const classificationCategoryLabels: Record<LabelCategoryHint, string> = {
+  RECEIVABLE: "받을 돈",
+  CARD_BILL: "카드 대금",
+  INSTALLMENT_PAYMENT: "할부 결제",
+  RENT: "임차료",
+  INSURANCE: "보험료",
+  UTILITY: "공과금",
+  LOAN_PAYMENT: "대출 상환",
+  TAX: "세금",
+  SAVINGS: "저축",
+  DISCRETIONARY_EXPENSE: "선택 지출",
+  OTHER_INFLOW: "기타 수입",
+  OTHER_OUTFLOW: "기타 지출",
+};
+
 interface CandidateCardProps extends CandidateOptions {
   candidate: ImportCandidate;
   candidateDetails: Record<string, CandidateDetails>;
   index: number;
   onReview: (key: string, value: ReviewValue) => void;
+  onSplit: (candidate: ImportCandidate, key: string) => void;
   onUpdateCandidateDetail: (key: string, field: string, value: string) => void;
   resolveCandidateDetails: (
     candidate: ImportCandidate,
     key: string,
   ) => CandidateDetails;
   review?: ReviewValue;
+  splitBusy: boolean;
+  splitError?: string;
+  splitting: boolean;
 }
 
 function CandidateCard({
@@ -239,9 +259,13 @@ function CandidateCard({
   counterpartiesLoading,
   index,
   onReview,
+  onSplit,
   onUpdateCandidateDetail,
   resolveCandidateDetails,
   review,
+  splitBusy,
+  splitError,
+  splitting,
 }: CandidateCardProps) {
   const key = candidateKey(candidate, index);
   const proposed = candidate.proposed_record || {};
@@ -271,6 +295,14 @@ function CandidateCard({
     candidate.amount ?? proposed.amount ?? proposed.original_amount;
   const occurrenceCount =
     candidate.occurrences || candidate.evidence_transaction_ids?.length;
+  const classification = candidate.classification_group;
+  const candidateId = candidate.candidate_id || candidate.id;
+  const confidenceLabel =
+    classification?.confidence === "HIGH"
+      ? "높은 신뢰도"
+      : classification?.confidence === "MEDIUM"
+        ? "중간 신뢰도"
+        : "낮은 신뢰도";
 
   return (
     <article className="candidate-card">
@@ -314,6 +346,57 @@ function CandidateCard({
           </button>
         ))}
       </fieldset>
+      {classification?.source === "AI" && (
+        <div className="candidate-classification">
+          <div className="candidate-classification-copy">
+            <span>AI 분류 · {confidenceLabel}</span>
+            <strong>{classification.normalized_name}</strong>
+            <p>{classification.labels.join(" · ")}</p>
+            <p>
+              AI 제안 · {classificationCategoryLabels[classification.category_hint]}
+              {" · "}
+              필수 지출{" "}
+              {classification.essential_hint === null
+                ? "판단 보류"
+                : classification.essential_hint
+                  ? "예"
+                  : "아니요"}
+            </p>
+            <small>{classification.reason}</small>
+          </div>
+          <button
+            aria-busy={splitting}
+            aria-describedby={
+              classification.can_split
+                ? undefined
+                : `candidate-split-help-${candidateId}`
+            }
+            className="button button-secondary candidate-split-button"
+            disabled={
+              splitBusy || !candidateId || classification.can_split !== true
+            }
+            onClick={() => onSplit(candidate, key)}
+            title={
+              classification.can_split
+                ? undefined
+                : "이 그룹은 개별 후보로 나눌 수 없습니다."
+            }
+            type="button"
+          >
+            {splitting ? "그룹을 해제하는 중..." : "그룹 해제"}
+          </button>
+          {classification.can_split !== true && (
+            <small id={`candidate-split-help-${candidateId}`}>
+              이 그룹은 개별 후보로 나눌 수 없습니다.
+            </small>
+          )}
+          {splitError && (
+            <p className="candidate-split-error" role="alert">
+              {splitError}
+            </p>
+          )}
+        </div>
+      )}
       {review === "CONFIRMED" && (
         <div className="candidate-confirmation">
           <div className="candidate-confirmation-heading">
@@ -497,7 +580,7 @@ function CandidateCard({
                     </select>
                   </label>
                 )}
-                {needsField("event_type") && (
+                {(needsField("event_type") || classification?.source === "AI") && (
                   <label className="field">
                     <span>지출 종류</span>
                     <select
@@ -523,7 +606,7 @@ function CandidateCard({
                     </select>
                   </label>
                 )}
-                {needsField("is_essential") && (
+                {(needsField("is_essential") || classification?.source === "AI") && (
                   <label className="field">
                     <span>필수 지출인가요?</span>
                     <select
@@ -644,12 +727,16 @@ interface CandidateReviewStepProps extends CandidateOptions {
   onAnalyze: () => void;
   onReset: () => void;
   onReview: (key: string, value: ReviewValue) => void;
+  onSplit: (candidate: ImportCandidate, key: string) => void;
   onUpdateCandidateDetail: (key: string, field: string, value: string) => void;
   resolveCandidateDetails: (
     candidate: ImportCandidate,
     key: string,
   ) => CandidateDetails;
   reviews: Record<string, ReviewValue>;
+  splitBusy: boolean;
+  splitErrors: Record<string, string>;
+  splittingCandidates: Record<string, boolean>;
 }
 
 export function CandidateReviewStep({
@@ -671,11 +758,30 @@ export function CandidateReviewStep({
   onAnalyze,
   onReset,
   onReview,
+  onSplit,
   onUpdateCandidateDetail,
   resolveCandidateDetails,
   reviews,
+  splitBusy,
+  splitErrors,
+  splittingCandidates,
 }: CandidateReviewStepProps) {
   const reviewCount = Object.keys(reviews).length;
+  const classification = importResult.classification_summary;
+  const classificationSource =
+    classification?.source === "AI"
+      ? "AI 분류 적용"
+      : classification?.source === "AI_SHADOW"
+        ? "AI 분류 관찰"
+        : "기존 규칙 기반 탐지";
+  const classificationStatus =
+    importResult.classification_status === "SUCCEEDED"
+      ? "분류 완료"
+      : importResult.classification_status === "REJECTED"
+        ? "검증 거부"
+        : importResult.classification_status === "FAILED"
+          ? "호출 실패"
+          : "호출하지 않음";
 
   return (
     <section className="setup-card card">
@@ -715,6 +821,33 @@ export function CandidateReviewStep({
         </div>
       </div>
 
+      {classification && (
+        <SubmitNotice
+          kind={
+            classification.source === "AI" && classification.applied
+              ? "success"
+              : "info"
+          }
+        >
+          <span className="classification-summary-copy">
+            <strong>
+              자동 탐지 출처: {classificationSource} · {classificationStatus}
+            </strong>
+            {classification.source === "DETERMINISTIC_FALLBACK"
+              ? "AI 분류를 적용하지 않고 기존 문자열 기준으로 후보를 찾았습니다."
+              : `${classification.original_label_count}개 표기를 ${classification.grouped_entity_count}개 거래 대상으로 정리했고, ${classification.merged_label_count}개 표기를 통합했습니다.${
+                  classification.applied
+                    ? " 아래 결과를 확인해 주세요."
+                    : " 현재 후보에는 적용하지 않았습니다."
+                }${
+                  classification.user_split_group_count
+                    ? ` 사용자가 ${classification.user_split_group_count}개 그룹을 해제했습니다.`
+                    : ""
+                }`}
+          </span>
+        </SubmitNotice>
+      )}
+
       {importResult.is_demo && (
         <SubmitNotice kind="info">
           합성 샘플은{" "}
@@ -748,9 +881,19 @@ export function CandidateReviewStep({
                 index={index}
                 key={key}
                 onReview={onReview}
+                onSplit={onSplit}
                 onUpdateCandidateDetail={onUpdateCandidateDetail}
                 resolveCandidateDetails={resolveCandidateDetails}
                 review={reviews[key]}
+                splitBusy={splitBusy}
+                splitError={
+                  splitErrors[candidate.candidate_id || candidate.id || ""]
+                }
+                splitting={Boolean(
+                  splittingCandidates[
+                    candidate.candidate_id || candidate.id || ""
+                  ],
+                )}
               />
             );
           })}
@@ -775,7 +918,7 @@ export function CandidateReviewStep({
         <div>
           <button
             className="button button-ghost"
-            disabled={busy}
+            disabled={busy || splitBusy}
             onClick={onReset}
             type="button"
           >
@@ -784,7 +927,7 @@ export function CandidateReviewStep({
           <button
             className="button button-primary"
             data-testid="setup-analyze"
-            disabled={busy}
+            disabled={busy || splitBusy}
             onClick={onAnalyze}
             type="button"
           >

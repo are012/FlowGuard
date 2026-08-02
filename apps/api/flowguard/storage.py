@@ -26,6 +26,7 @@ from sqlalchemy import (
     delete,
     func,
     select,
+    update,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -115,6 +116,10 @@ class RecordNotFound(StorageError):
 
 class StorageConflict(StorageError):
     """An immutable or uniquely keyed entity already exists."""
+
+
+class DataRevisionConflict(StorageConflict):
+    """A current-state write was prepared from a stale data revision."""
 
 
 class InvalidAnalysisTransition(StorageError):
@@ -258,6 +263,36 @@ class AIInterpretationRunRow(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AIClassificationRunRow(Base):
+    __tablename__ = "ai_classification_runs"
+
+    classification_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    import_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    request_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    label_set_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    label_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    group_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    merged_label_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     response_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -482,6 +517,9 @@ class FlowGuardRepository:
         bundle: Mapping[str, Iterable[Mapping[str, Any]]],
         *,
         replace_kinds: set[str] | None = None,
+        classification_completion: Mapping[str, Any] | None = None,
+        candidate_preconditions: Mapping[str, Mapping[str, Any]] | None = None,
+        expected_revision: str | None = None,
     ) -> dict[str, int]:
         """Apply a multi-kind import in one transaction."""
 
@@ -498,7 +536,25 @@ class FlowGuardRepository:
 
         with self._session() as session:
             if prepared:
-                self._bump_data_revision(session, user_id)
+                new_revision = self._bump_data_revision(session, user_id)
+                if expected_revision is not None and expected_revision != f"rev-{new_revision - 1}":
+                    raise DataRevisionConflict(
+                        "data revision changed before the record bundle was saved"
+                    )
+            for candidate_id, expected in (candidate_preconditions or {}).items():
+                candidate = session.get(
+                    CurrentRecordRow,
+                    {
+                        "user_id": user_id,
+                        "kind": "candidates",
+                        "record_id": candidate_id,
+                    },
+                    with_for_update=True,
+                )
+                if candidate is None or candidate.payload != jsonable(expected):
+                    raise StorageConflict(
+                        f"candidate:{candidate_id} changed before the decision was saved"
+                    )
             for kind, (id_field, payloads) in prepared.items():
                 if kind in replace_kinds:
                     session.execute(
@@ -530,7 +586,174 @@ class FlowGuardRepository:
                     else:
                         row.payload = payload
                         row.updated_at = utc_now()
+            if classification_completion is not None:
+                classification_id = str(classification_completion["classification_id"])
+                classification = session.get(
+                    AIClassificationRunRow,
+                    classification_id,
+                    with_for_update=True,
+                )
+                if classification is None:
+                    raise RecordNotFound(f"classification:{classification_id} not found")
+                if classification.user_id != user_id:
+                    raise StorageConflict("classification run belongs to another user")
+                if classification.import_id != classification_completion.get("import_id"):
+                    raise StorageConflict("classification import identity mismatch")
+                if classification.label_set_hash != classification_completion.get("label_set_hash"):
+                    raise StorageConflict("classification label-set identity mismatch")
+                if (
+                    classification_completion.get("status") == "SUCCEEDED"
+                    and classification_completion.get("applied") is True
+                ):
+                    self._complete_classification_success(
+                        session,
+                        classification,
+                        classification_completion,
+                    )
+                else:
+                    self._verify_classification_persistence_guard(
+                        classification,
+                        classification_completion,
+                    )
         return {kind: len(payloads) for kind, (_, payloads) in prepared.items()}
+
+    def split_candidate_group(
+        self,
+        user_id: str,
+        candidate_id: str,
+        *,
+        alternatives: Iterable[Mapping[str, Any]],
+        notices: Iterable[Mapping[str, Any]],
+        expected_candidate: Mapping[str, Any] | None = None,
+        expected_revision: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically supersede one pending AI group with deterministic alternatives."""
+
+        prepared_alternatives = [jsonable(item) for item in alternatives]
+        prepared_notices = [jsonable(item) for item in notices]
+        for payload in prepared_alternatives:
+            if not isinstance(payload.get("candidate_id"), str) or not payload["candidate_id"]:
+                raise StorageError("candidates record requires candidate_id")
+        for payload in prepared_notices:
+            if not isinstance(payload.get("notice_id"), str) or not payload["notice_id"]:
+                raise StorageError("data_quality_notices record requires notice_id")
+
+        with self._session() as session:
+            new_revision = self._bump_data_revision(session, user_id)
+            if expected_revision is not None and expected_revision != f"rev-{new_revision - 1}":
+                raise StorageConflict("data revision changed before candidate split")
+            source = session.get(
+                CurrentRecordRow,
+                {
+                    "user_id": user_id,
+                    "kind": "candidates",
+                    "record_id": candidate_id,
+                },
+                with_for_update=True,
+            )
+            if source is None:
+                raise RecordNotFound(f"candidate:{candidate_id} not found")
+            source_payload = dict(source.payload)
+            if expected_candidate is not None and source_payload != jsonable(expected_candidate):
+                raise StorageConflict("candidate changed before group split")
+            classification = source_payload.get("classification_group")
+            if (
+                source_payload.get("status") != "PENDING"
+                or not isinstance(classification, Mapping)
+                or classification.get("can_split") is not True
+                or classification.get("user_split") is True
+            ):
+                raise StorageConflict("candidate group is no longer splittable")
+
+            for alternative in prepared_alternatives:
+                alternative_id = str(alternative["candidate_id"])
+                existing = session.get(
+                    CurrentRecordRow,
+                    {
+                        "user_id": user_id,
+                        "kind": "candidates",
+                        "record_id": alternative_id,
+                    },
+                    with_for_update=True,
+                )
+                if existing is not None and existing.payload.get("status") != "PENDING":
+                    raise StorageConflict(
+                        f"candidate:{alternative_id} already has a final decision"
+                    )
+
+            source.payload = {
+                **source_payload,
+                "status": "REJECTED",
+                "classification_group": {
+                    **dict(classification),
+                    "can_split": False,
+                    "user_split": True,
+                },
+            }
+            source.updated_at = utc_now()
+            for alternative in prepared_alternatives:
+                alternative_id = str(alternative["candidate_id"])
+                row = session.get(
+                    CurrentRecordRow,
+                    {
+                        "user_id": user_id,
+                        "kind": "candidates",
+                        "record_id": alternative_id,
+                    },
+                )
+                if row is None:
+                    session.add(
+                        CurrentRecordRow(
+                            user_id=user_id,
+                            kind="candidates",
+                            record_id=alternative_id,
+                            payload=alternative,
+                        )
+                    )
+                else:
+                    row.payload = alternative
+                    row.updated_at = utc_now()
+
+            confirmation_notices = session.scalars(
+                select(CurrentRecordRow).where(
+                    CurrentRecordRow.user_id == user_id,
+                    CurrentRecordRow.kind == "data_quality_notices",
+                )
+            ).all()
+            for row in confirmation_notices:
+                if row.payload.get(
+                    "code"
+                ) == "USER_CONFIRMATION_REQUIRED" and candidate_id in row.payload.get(
+                    "record_ids", []
+                ):
+                    session.delete(row)
+            for notice in prepared_notices:
+                notice_id = str(notice["notice_id"])
+                row = session.get(
+                    CurrentRecordRow,
+                    {
+                        "user_id": user_id,
+                        "kind": "data_quality_notices",
+                        "record_id": notice_id,
+                    },
+                )
+                if row is None:
+                    session.add(
+                        CurrentRecordRow(
+                            user_id=user_id,
+                            kind="data_quality_notices",
+                            record_id=notice_id,
+                            payload=notice,
+                        )
+                    )
+                else:
+                    row.payload = notice
+                    row.updated_at = utc_now()
+
+        return {
+            "candidate_id": candidate_id,
+            "candidates": prepared_alternatives,
+        }
 
     def replace_records(self, user_id: str, kind: str, records: Iterable[Mapping[str, Any]]) -> int:
         materialized = list(records)
@@ -569,6 +792,9 @@ class FlowGuardRepository:
                 session.scalars(
                     select(AnalysisRunRow.analysis_id).where(AnalysisRunRow.user_id == user_id)
                 )
+            )
+            session.execute(
+                delete(AIClassificationRunRow).where(AIClassificationRunRow.user_id == user_id)
             )
             session.execute(delete(ApprovalAuditRow).where(ApprovalAuditRow.user_id == user_id))
             session.execute(delete(RecommendationRow).where(RecommendationRow.user_id == user_id))
@@ -1149,6 +1375,210 @@ class FlowGuardRepository:
             )
             return self._interpretation_dict(row) if row is not None else None
 
+    def create_or_get_classification_run(
+        self,
+        *,
+        user_id: str,
+        import_id: str,
+        request_id: str,
+        idempotency_key: str,
+        label_set_hash: str,
+        schema_version: str,
+        contract_version: str,
+        prompt_version: str,
+        mode: str,
+        label_count: int,
+        model_name: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        if mode not in {"SHADOW", "ON"}:
+            raise StorageError(f"unsupported classification mode {mode}")
+        if label_count < 0:
+            raise StorageError("classification label_count cannot be negative")
+        identity: dict[str, Any] = {
+            "user_id": user_id,
+            "import_id": import_id,
+            "request_id": request_id,
+            "label_set_hash": label_set_hash,
+            "schema_version": schema_version,
+            "contract_version": contract_version,
+            "prompt_version": prompt_version,
+            "mode": mode,
+            "label_count": label_count,
+        }
+        try:
+            with self._session() as session:
+                existing = session.scalar(
+                    select(AIClassificationRunRow).where(
+                        AIClassificationRunRow.idempotency_key == idempotency_key
+                    )
+                )
+                if existing is not None:
+                    self._assert_classification_identity(existing, identity)
+                    return self._classification_dict(existing), False
+                row = AIClassificationRunRow(
+                    classification_id=f"classification-{uuid4()}",
+                    user_id=user_id,
+                    import_id=import_id,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                    label_set_hash=label_set_hash,
+                    schema_version=schema_version,
+                    contract_version=contract_version,
+                    prompt_version=prompt_version,
+                    mode=mode,
+                    status="IN_PROGRESS",
+                    label_count=label_count,
+                    model_name=model_name,
+                )
+                session.add(row)
+                session.flush()
+                return self._classification_dict(row), True
+        except IntegrityError as exc:
+            with self._session() as session:
+                existing = session.scalar(
+                    select(AIClassificationRunRow).where(
+                        AIClassificationRunRow.idempotency_key == idempotency_key
+                    )
+                )
+                if existing is None:
+                    raise StorageConflict(
+                        "could not resolve classification idempotency race"
+                    ) from exc
+                self._assert_classification_identity(existing, identity)
+                return self._classification_dict(existing), False
+
+    def update_classification_run(
+        self,
+        classification_id: str,
+        *,
+        status: str,
+        applied: bool | None = None,
+        attempt_count: int | None = None,
+        fallback_used: bool | None = None,
+        latency_ms: int | None = None,
+        group_count: int | None = None,
+        merged_label_count: int | None = None,
+        response_payload: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
+        terminal_statuses = {"SUCCEEDED", "REJECTED", "FAILED"}
+        if status not in {"IN_PROGRESS", *terminal_statuses}:
+            raise StorageError(f"unsupported classification status {status}")
+        for field, value in {
+            "attempt_count": attempt_count,
+            "latency_ms": latency_ms,
+            "group_count": group_count,
+            "merged_label_count": merged_label_count,
+        }.items():
+            if value is not None and value < 0:
+                raise StorageError(f"classification {field} cannot be negative")
+        if response_payload is not None and status != "SUCCEEDED":
+            raise StorageError("classification response payload requires SUCCEEDED status")
+        if status == "SUCCEEDED" and (
+            response_payload is None
+            or group_count is None
+            or merged_label_count is None
+            or error_code is not None
+        ):
+            raise StorageError(
+                "successful classification requires payload and complete group counts"
+            )
+        if status in {"REJECTED", "FAILED"} and (
+            applied is True
+            or response_payload is not None
+            or group_count is not None
+            or merged_label_count is not None
+        ):
+            raise StorageError("failed classification cannot contain an applied result")
+
+        with self._session() as session:
+            row = session.get(
+                AIClassificationRunRow,
+                classification_id,
+                with_for_update=True,
+            )
+            if row is None:
+                raise RecordNotFound(f"classification:{classification_id} not found")
+            if status == "SUCCEEDED":
+                self._validate_classification_success(
+                    row,
+                    group_count=group_count,
+                    merged_label_count=merged_label_count,
+                    response_payload=response_payload,
+                )
+            if row.status in terminal_statuses:
+                self._assert_idempotent_classification_update(
+                    row,
+                    status=status,
+                    applied=applied,
+                    fallback_used=fallback_used,
+                    group_count=group_count,
+                    merged_label_count=merged_label_count,
+                    response_payload=response_payload,
+                    error_code=error_code,
+                )
+                return self._classification_dict(row)
+            if status == "SUCCEEDED" and row.mode == "ON":
+                raise StorageError(
+                    "successful ON classification must be completed with apply_record_bundle"
+                )
+            applied_value = row.applied if applied is None else applied
+            if applied_value and (status != "SUCCEEDED" or row.mode != "ON"):
+                raise StorageError("only a successful ON classification can be applied")
+            values: dict[str, Any] = {
+                "status": status,
+                "applied": applied_value,
+                "error_code": error_code,
+            }
+            if attempt_count is not None:
+                values["attempt_count"] = attempt_count
+            if fallback_used is not None:
+                values["fallback_used"] = fallback_used
+            if latency_ms is not None:
+                values["latency_ms"] = latency_ms
+            if group_count is not None:
+                values["group_count"] = group_count
+            if merged_label_count is not None:
+                values["merged_label_count"] = merged_label_count
+            if response_payload is not None:
+                values["response_payload"] = jsonable(response_payload)
+            if status in terminal_statuses:
+                values["completed_at"] = utc_now()
+            transitioned = session.execute(
+                update(AIClassificationRunRow)
+                .where(
+                    AIClassificationRunRow.classification_id == classification_id,
+                    AIClassificationRunRow.status == "IN_PROGRESS",
+                )
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            if transitioned.rowcount != 1:
+                raise StorageConflict("classification terminal transition lost a concurrent race")
+            session.expire(row)
+            return self._classification_dict(row)
+
+    def get_classification_run(self, classification_id: str) -> dict[str, Any]:
+        with self._session() as session:
+            row = session.get(AIClassificationRunRow, classification_id)
+            if row is None:
+                raise RecordNotFound(f"classification:{classification_id} not found")
+            return self._classification_dict(row)
+
+    def latest_classification_run(
+        self, user_id: str, *, import_id: str | None = None
+    ) -> dict[str, Any] | None:
+        with self._session() as session:
+            statement = select(AIClassificationRunRow).where(
+                AIClassificationRunRow.user_id == user_id
+            )
+            if import_id is not None:
+                statement = statement.where(AIClassificationRunRow.import_id == import_id)
+            row = session.scalar(
+                statement.order_by(AIClassificationRunRow.created_at.desc()).limit(1)
+            )
+            return self._classification_dict(row) if row is not None else None
+
     def save_recommendation(
         self,
         *,
@@ -1365,6 +1795,163 @@ class FlowGuardRepository:
             "created_at": row.created_at.isoformat(),
             "completed_at": row.completed_at.isoformat() if row.completed_at else None,
         }
+
+    @staticmethod
+    def _classification_dict(row: AIClassificationRunRow) -> dict[str, Any]:
+        return {
+            "classification_id": row.classification_id,
+            "user_id": row.user_id,
+            "import_id": row.import_id,
+            "request_id": row.request_id,
+            "idempotency_key": row.idempotency_key,
+            "label_set_hash": row.label_set_hash,
+            "schema_version": row.schema_version,
+            "contract_version": row.contract_version,
+            "prompt_version": row.prompt_version,
+            "mode": row.mode,
+            "status": row.status,
+            "applied": row.applied,
+            "attempt_count": row.attempt_count,
+            "fallback_used": row.fallback_used,
+            "latency_ms": row.latency_ms,
+            "model_name": row.model_name,
+            "label_count": row.label_count,
+            "group_count": row.group_count,
+            "merged_label_count": row.merged_label_count,
+            "response_payload": row.response_payload,
+            "error_code": row.error_code,
+            "created_at": row.created_at.isoformat(),
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        }
+
+    @staticmethod
+    def _assert_classification_identity(
+        row: AIClassificationRunRow,
+        expected: Mapping[str, Any],
+    ) -> None:
+        mismatches = [field for field, value in expected.items() if getattr(row, field) != value]
+        if mismatches:
+            raise StorageConflict(
+                "idempotency key was reused with different classification fields: "
+                + ", ".join(mismatches)
+            )
+
+    @staticmethod
+    def _complete_classification_success(
+        session: Session,
+        row: AIClassificationRunRow,
+        completion: Mapping[str, Any],
+    ) -> None:
+        if completion.get("status") != "SUCCEEDED" or completion.get("applied") is not True:
+            raise StorageError("atomic classification completion requires applied success")
+        if row.mode != "ON":
+            raise StorageError("only ON classification can be atomically applied")
+        group_count = int(completion["group_count"])
+        merged_label_count = int(completion["merged_label_count"])
+        response_payload = completion.get("response_payload")
+        FlowGuardRepository._validate_classification_success(
+            row,
+            group_count=group_count,
+            merged_label_count=merged_label_count,
+            response_payload=response_payload,
+        )
+        if row.status == "SUCCEEDED":
+            FlowGuardRepository._assert_idempotent_classification_update(
+                row,
+                status="SUCCEEDED",
+                applied=True,
+                fallback_used=False,
+                group_count=group_count,
+                merged_label_count=merged_label_count,
+                response_payload=response_payload,
+                error_code=None,
+            )
+            return
+        if row.status != "IN_PROGRESS":
+            raise StorageConflict("classification terminal status is immutable")
+        transitioned = session.execute(
+            update(AIClassificationRunRow)
+            .where(
+                AIClassificationRunRow.classification_id == row.classification_id,
+                AIClassificationRunRow.status == "IN_PROGRESS",
+            )
+            .values(
+                status="SUCCEEDED",
+                applied=True,
+                attempt_count=int(completion["attempt_count"]),
+                fallback_used=False,
+                latency_ms=int(completion["latency_ms"]),
+                group_count=group_count,
+                merged_label_count=merged_label_count,
+                response_payload=jsonable(response_payload),
+                error_code=None,
+                completed_at=utc_now(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if transitioned.rowcount != 1:
+            raise StorageConflict("classification terminal transition lost a concurrent race")
+        session.expire(row)
+
+    @staticmethod
+    def _verify_classification_persistence_guard(
+        row: AIClassificationRunRow,
+        guard: Mapping[str, Any],
+    ) -> None:
+        status = guard.get("status")
+        if status not in {"SUCCEEDED", "REJECTED", "FAILED"}:
+            raise StorageError("classification persistence guard requires terminal status")
+        if guard.get("applied") is not False:
+            raise StorageError("non-applied classification guard requires applied=false")
+        if row.status != status or row.applied is not False:
+            raise StorageConflict("classification persistence guard no longer matches")
+
+    @staticmethod
+    def _assert_idempotent_classification_update(
+        row: AIClassificationRunRow,
+        *,
+        status: str,
+        applied: bool | None,
+        fallback_used: bool | None,
+        group_count: int | None,
+        merged_label_count: int | None,
+        response_payload: Mapping[str, Any] | None,
+        error_code: str | None,
+    ) -> None:
+        expected = {
+            "status": status,
+            **({"applied": applied} if applied is not None else {}),
+            **({"fallback_used": fallback_used} if fallback_used is not None else {}),
+            **({"group_count": group_count} if group_count is not None else {}),
+            **(
+                {"merged_label_count": merged_label_count} if merged_label_count is not None else {}
+            ),
+            **({"error_code": error_code} if error_code is not None else {}),
+        }
+        mismatches = [field for field, value in expected.items() if getattr(row, field) != value]
+        if response_payload is not None and row.response_payload != jsonable(response_payload):
+            mismatches.append("response_payload")
+        if mismatches:
+            raise StorageConflict(
+                "classification terminal status is immutable: " + ", ".join(mismatches)
+            )
+
+    @staticmethod
+    def _validate_classification_success(
+        row: AIClassificationRunRow,
+        *,
+        group_count: int | None,
+        merged_label_count: int | None,
+        response_payload: Mapping[str, Any] | None,
+    ) -> None:
+        if group_count is None or merged_label_count is None or response_payload is None:
+            raise StorageError(
+                "successful classification requires payload and complete group counts"
+            )
+        if group_count + merged_label_count != row.label_count:
+            raise StorageError("classification group counts do not cover the label set")
+        if "labels" in response_payload:
+            raise StorageError("classification audit payload must not contain request labels")
 
     @staticmethod
     def _assert_interpretation_identity(

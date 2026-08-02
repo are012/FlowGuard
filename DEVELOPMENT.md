@@ -4,15 +4,16 @@ This repository implements the contest MVP described in `SPECIFICATION.md`. The
 financial calculations and recommendation candidates are deterministic. The
 backend investigator selects evidence, builds predefined actions, and validates
 them without inventing balances, gaps, probabilities, or policy results. A
-separate AI service may rank validated candidates and explain them to the user.
+separate AI service may group privacy-minimized transaction labels, rank validated
+candidates, and explain them to the user.
 
 ## Local topology
 
 - `apps/api`: FastAPI, the deterministic financial core, the investigator, REST
   API, MCP tools, and persistence.
 - `apps/ai-service/main.py`: the deployment entrypoint for an independently
-  started FastAPI process that calls OpenAI for candidate ranking and
-  user-facing explanations only. Its implementation comes from the same
+  started FastAPI process that calls OpenAI for label grouping, candidate
+  ranking, and user-facing explanations. Its implementation comes from the same
   `apps/api` Python distribution; see `apps/ai-service/README.md`.
 - `apps/web`: Next.js user interface.
 - The investigator invokes the MCP-compatible `CoreToolService` in process. A
@@ -34,18 +35,19 @@ No endpoint performs a real transfer, changes a real card payment date, or appli
 for a financial product. Approving a recommendation creates and analyzes a
 virtual snapshot only.
 
-## Separate AI interpretation service
+## Separate AI classification and interpretation service
 
 The backend always owns snapshot creation, financial calculations, evidence and
 MCP tool selection, candidate generation, simulation, and policy validation. It
 never imports an OpenAI client or reads `OPENAI_API_KEY`. The isolated AI service
-receives only validated `facts`, `evidence`, and `actionCandidates`; it has no
-database or MCP access and cannot create a new financial action.
+receives either a privacy-minimized label projection or validated `facts`,
+`evidence`, and `actionCandidates`; it has no database or MCP access and cannot
+create a new financial action.
 
-The backend and AI service communicate through contract `1.1`. Each request and
-response carries the analysis, snapshot, revision, request, idempotency, prompt,
-and locale identifiers needed for strict correlation. Unknown actions, duplicate
-rankings, malformed responses, and mismatched identifiers are rejected.
+The `/classify/labels` endpoint uses contract `1.2` and `/interpret` keeps contract
+`1.1`. Requests and responses carry endpoint-specific correlation and idempotency
+identifiers. Unknown labels or actions, duplicate coverage, malformed responses,
+numeric claims, and mismatched identifiers are rejected.
 
 Copy the environment examples into separate files:
 
@@ -57,6 +59,27 @@ cp apps/ai-service/.env.example apps/ai-service/.env
 Put `OPENAI_API_KEY` only in `apps/ai-service/.env`. `OPENAI_MODEL` selects the
 model in that process. `FLOWGUARD_AI_MODEL_NAME` in `apps/api/.env` is audit
 metadata only and must match the deployed AI service configuration.
+
+Label classification is opt-in from the API process:
+
+```bash
+FLOWGUARD_AI_CLASSIFICATION=off     # default; exact legacy grouping and response
+FLOWGUARD_AI_CLASSIFICATION=shadow  # call and audit, but do not apply
+FLOWGUARD_AI_CLASSIFICATION=on      # apply only a fully validated response
+```
+
+Classification sends only opaque label IDs, redacted label text, direction, and
+occurrence count. Amounts, dates, accounts, balances, and transaction IDs remain
+in the backend. A failed or rejected response falls back to
+`deterministic_grouping()` and does not block the CSV import.
+
+The logical import ID is stable for the same user, mode, label set, schema,
+contract, prompt, and locale.
+A successful classification is reused. A later upload after `FAILED` or `REJECTED`
+creates a new attempt key with `:retry-<classification_id>`, while retries within
+one attempt keep the same request and idempotency identifiers. User-split groups
+stay split on later uploads with the same labels. Classified imports compare the
+data revision at commit time and reconcile again after a concurrent split.
 
 The backend uses a 3-second connection timeout, 10-second response timeout, and
 15-second total budget. It retries at most once, and only for connection failures,
@@ -101,6 +124,7 @@ decisions explicit and versioned:
 | CSV | UTF-8 wide CSV with `record_type`; legacy transaction-only rows remain valid |
 | Persistence | Alembic-managed SQLite is tested; a PostgreSQL URL/driver path exists but production PostgreSQL remains expansion work; no Docker resources are created |
 | AI interpretation retry | One retry only for documented transient transport and HTTP failures, within a 15-second total budget |
+| AI label classification | Off by default; contract 1.2, privacy-minimized labels, strict validation, deterministic fallback |
 | Latest report promotion | Only a result matching the latest data revision can become the latest report |
 
 The exact constants and version identifiers live in

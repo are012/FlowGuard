@@ -8,7 +8,9 @@ from flowguard.services.data import DataService
 from flowguard.storage import (
     FlowGuardRepository,
     InvalidAnalysisTransition,
+    RecordNotFound,
     StorageConflict,
+    StorageError,
 )
 
 
@@ -199,6 +201,459 @@ def test_interpretation_run_is_idempotent_and_persists_audit_fields(
 
     with pytest.raises(StorageConflict):
         repository.create_or_get_interpretation_run(**{**values, "request_id": "different-request"})
+
+
+def test_classification_run_is_idempotent_and_persists_only_audit_fields(
+    repository: FlowGuardRepository,
+) -> None:
+    values = {
+        "user_id": "user-1",
+        "import_id": "import-1",
+        "request_id": "ai-classify-1",
+        "idempotency_key": "import-1:labels-hash:contract-1.2:classify-1:ko-KR",
+        "label_set_hash": "labels-hash",
+        "schema_version": "1.2",
+        "contract_version": "1.2",
+        "prompt_version": "classify-1",
+        "mode": "ON",
+        "label_count": 4,
+        "model_name": "test-model",
+    }
+
+    first, created = repository.create_or_get_classification_run(**values)
+    second, created_again = repository.create_or_get_classification_run(**values)
+    response_payload = {"groups": [{"groupId": "G1", "labelIds": ["L1", "L2"]}]}
+    repository.apply_record_bundle(
+        "user-1",
+        {"accounts": [{"account_id": "account-1", "balance": 100}]},
+        classification_completion={
+            "classification_id": first["classification_id"],
+            "import_id": values["import_id"],
+            "label_set_hash": values["label_set_hash"],
+            "status": "SUCCEEDED",
+            "applied": True,
+            "attempt_count": 1,
+            "fallback_used": False,
+            "latency_ms": 25,
+            "group_count": 2,
+            "merged_label_count": 2,
+            "response_payload": response_payload,
+            "error_code": None,
+        },
+    )
+    completed = repository.get_classification_run(first["classification_id"])
+
+    assert created is True
+    assert created_again is False
+    assert second["classification_id"] == first["classification_id"]
+    assert completed["status"] == "SUCCEEDED"
+    assert completed["applied"] is True
+    assert completed["attempt_count"] == 1
+    assert completed["group_count"] == 2
+    assert completed["merged_label_count"] == 2
+    assert completed["completed_at"] is not None
+    assert "labels" not in completed
+    assert repository.get_record("user-1", "accounts", "account-1")["balance"] == 100
+    stored = repository.get_classification_run(first["classification_id"])
+    latest = repository.latest_classification_run("user-1", import_id="import-1")
+    assert stored["classification_id"] == completed["classification_id"]
+    assert stored["response_payload"] == completed["response_payload"]
+    assert latest is not None
+    assert latest["classification_id"] == completed["classification_id"]
+
+    with pytest.raises(StorageConflict):
+        repository.create_or_get_classification_run(**{**values, "request_id": "different-request"})
+
+
+def test_classification_run_enforces_mode_status_and_payload_boundaries(
+    repository: FlowGuardRepository,
+) -> None:
+    values = {
+        "user_id": "user-1",
+        "import_id": "import-1",
+        "request_id": "ai-classify-1",
+        "idempotency_key": "classification-key",
+        "label_set_hash": "labels-hash",
+        "schema_version": "1.2",
+        "contract_version": "1.2",
+        "prompt_version": "classify-1",
+        "mode": "SHADOW",
+        "label_count": 2,
+    }
+    run, _created = repository.create_or_get_classification_run(**values)
+
+    with pytest.raises(StorageError):
+        repository.update_classification_run(
+            run["classification_id"], status="SUCCEEDED", applied=True
+        )
+    with pytest.raises(StorageError):
+        repository.update_classification_run(
+            run["classification_id"],
+            status="REJECTED",
+            response_payload={"untrusted": "response"},
+        )
+    with pytest.raises(StorageError):
+        repository.update_classification_run(run["classification_id"], status="UNKNOWN")
+    with pytest.raises(StorageError):
+        repository.create_or_get_classification_run(**{**values, "mode": "OFF"})
+
+
+def test_classification_terminal_state_is_immutable_and_identical_update_is_safe(
+    repository: FlowGuardRepository,
+) -> None:
+    values = {
+        "user_id": "user-1",
+        "import_id": "import-1",
+        "request_id": "ai-classify-1",
+        "idempotency_key": "classification-terminal-key",
+        "label_set_hash": "labels-hash",
+        "schema_version": "1.2",
+        "contract_version": "1.2",
+        "prompt_version": "classify-1",
+        "mode": "ON",
+        "label_count": 2,
+    }
+    run, _ = repository.create_or_get_classification_run(**values)
+    failed = repository.update_classification_run(
+        run["classification_id"],
+        status="FAILED",
+        applied=False,
+        attempt_count=2,
+        fallback_used=True,
+        latency_ms=10,
+        error_code="connection_failed",
+    )
+    repeated = repository.update_classification_run(
+        run["classification_id"],
+        status="FAILED",
+        applied=False,
+        attempt_count=2,
+        fallback_used=True,
+        latency_ms=10,
+        error_code="connection_failed",
+    )
+
+    assert repeated["classification_id"] == failed["classification_id"]
+    assert repeated["status"] == failed["status"]
+    assert repeated["error_code"] == failed["error_code"]
+    with pytest.raises(StorageConflict):
+        repository.update_classification_run(
+            run["classification_id"],
+            status="SUCCEEDED",
+            applied=True,
+            group_count=1,
+            merged_label_count=1,
+            response_payload={"groups": [], "ungrouped": ["L1", "L2"]},
+        )
+
+
+def test_sqlite_applied_classification_cannot_be_overwritten_by_failed_terminal(
+    repository: FlowGuardRepository,
+) -> None:
+    run, _ = repository.create_or_get_classification_run(
+        user_id="user-1",
+        import_id="import-success-wins",
+        request_id="ai-classify-success-wins",
+        idempotency_key="classification-success-wins",
+        label_set_hash="labels-hash",
+        schema_version="1.2",
+        contract_version="1.2",
+        prompt_version="classify-1",
+        mode="ON",
+        label_count=2,
+    )
+    repository.apply_record_bundle(
+        "user-1",
+        {"accounts": [{"account_id": "account-success", "balance": 100}]},
+        classification_completion={
+            "classification_id": run["classification_id"],
+            "import_id": "import-success-wins",
+            "label_set_hash": "labels-hash",
+            "status": "SUCCEEDED",
+            "applied": True,
+            "attempt_count": 1,
+            "fallback_used": False,
+            "latency_ms": 5,
+            "group_count": 1,
+            "merged_label_count": 1,
+            "response_payload": {"groups": [], "ungrouped": ["L1", "L2"]},
+            "error_code": None,
+        },
+    )
+
+    with pytest.raises(StorageConflict):
+        repository.update_classification_run(
+            run["classification_id"],
+            status="FAILED",
+            applied=False,
+            attempt_count=1,
+            fallback_used=True,
+            latency_ms=7,
+            error_code="late_failure",
+        )
+
+    stored = repository.get_classification_run(run["classification_id"])
+    assert stored["status"] == "SUCCEEDED"
+    assert stored["applied"] is True
+    assert repository.get_record("user-1", "accounts", "account-success")["balance"] == 100
+
+
+def test_sqlite_failed_classification_blocks_atomic_success_and_rolls_back_bundle(
+    repository: FlowGuardRepository,
+) -> None:
+    run, _ = repository.create_or_get_classification_run(
+        user_id="user-1",
+        import_id="import-failure-wins",
+        request_id="ai-classify-failure-wins",
+        idempotency_key="classification-failure-wins",
+        label_set_hash="labels-hash",
+        schema_version="1.2",
+        contract_version="1.2",
+        prompt_version="classify-1",
+        mode="ON",
+        label_count=2,
+    )
+    repository.update_classification_run(
+        run["classification_id"],
+        status="FAILED",
+        applied=False,
+        attempt_count=1,
+        fallback_used=True,
+        latency_ms=5,
+        error_code="winner_failed",
+    )
+    before_revision = repository.current_state_revision("user-1")
+
+    with pytest.raises(StorageConflict):
+        repository.apply_record_bundle(
+            "user-1",
+            {"accounts": [{"account_id": "account-loser", "balance": 100}]},
+            classification_completion={
+                "classification_id": run["classification_id"],
+                "import_id": "import-failure-wins",
+                "label_set_hash": "labels-hash",
+                "status": "SUCCEEDED",
+                "applied": True,
+                "attempt_count": 1,
+                "fallback_used": False,
+                "latency_ms": 7,
+                "group_count": 1,
+                "merged_label_count": 1,
+                "response_payload": {"groups": [], "ungrouped": ["L1", "L2"]},
+                "error_code": None,
+            },
+        )
+
+    stored = repository.get_classification_run(run["classification_id"])
+    assert stored["status"] == "FAILED"
+    assert stored["applied"] is False
+    assert repository.current_state_revision("user-1") == before_revision
+    assert repository.list_records("user-1", "accounts") == []
+
+
+def test_sqlite_non_applied_guard_rolls_back_when_reset_deleted_audit(
+    repository: FlowGuardRepository,
+) -> None:
+    run, _ = repository.create_or_get_classification_run(
+        user_id="user-1",
+        import_id="import-reset-guard",
+        request_id="ai-classify-reset-guard",
+        idempotency_key="classification-reset-guard",
+        label_set_hash="labels-hash",
+        schema_version="1.2",
+        contract_version="1.2",
+        prompt_version="classify-1",
+        mode="ON",
+        label_count=2,
+    )
+    failed = repository.update_classification_run(
+        run["classification_id"],
+        status="FAILED",
+        applied=False,
+        attempt_count=1,
+        fallback_used=True,
+        latency_ms=5,
+        error_code="classification_failed",
+    )
+    repository.reset_user_data("user-1")
+    before_revision = repository.current_state_revision("user-1")
+
+    with pytest.raises(RecordNotFound):
+        repository.apply_record_bundle(
+            "user-1",
+            {"accounts": [{"account_id": "account-after-reset", "balance": 100}]},
+            classification_completion={
+                "classification_id": failed["classification_id"],
+                "import_id": failed["import_id"],
+                "label_set_hash": failed["label_set_hash"],
+                "status": "FAILED",
+                "applied": False,
+            },
+        )
+
+    assert repository.current_state_revision("user-1") == before_revision
+    assert repository.list_records("user-1", "accounts") == []
+
+
+def test_classification_success_requires_complete_validated_result(
+    repository: FlowGuardRepository,
+) -> None:
+    run, _ = repository.create_or_get_classification_run(
+        user_id="user-1",
+        import_id="import-1",
+        request_id="ai-classify-1",
+        idempotency_key="classification-incomplete-success",
+        label_set_hash="labels-hash",
+        schema_version="1.2",
+        contract_version="1.2",
+        prompt_version="classify-1",
+        mode="ON",
+        label_count=2,
+    )
+
+    with pytest.raises(StorageError):
+        repository.update_classification_run(
+            run["classification_id"],
+            status="SUCCEEDED",
+            applied=True,
+        )
+    with pytest.raises(StorageError):
+        repository.update_classification_run(
+            run["classification_id"],
+            status="SUCCEEDED",
+            applied=True,
+            group_count=2,
+            merged_label_count=2,
+            response_payload={"groups": []},
+        )
+    with pytest.raises(StorageError, match="apply_record_bundle"):
+        repository.update_classification_run(
+            run["classification_id"],
+            status="SUCCEEDED",
+            applied=True,
+            attempt_count=1,
+            fallback_used=False,
+            latency_ms=5,
+            group_count=1,
+            merged_label_count=1,
+            response_payload={"groups": [], "ungrouped": ["L1", "L2"]},
+        )
+    assert repository.get_classification_run(run["classification_id"])["status"] == ("IN_PROGRESS")
+
+
+def test_classification_completion_rejects_cross_user_and_rolls_back_bundle(
+    repository: FlowGuardRepository,
+) -> None:
+    run, _ = repository.create_or_get_classification_run(
+        user_id="user-2",
+        import_id="import-user-2",
+        request_id="ai-classify-user-2",
+        idempotency_key="classification-user-2-completion",
+        label_set_hash="labels-hash",
+        schema_version="1.2",
+        contract_version="1.2",
+        prompt_version="classify-1",
+        mode="ON",
+        label_count=2,
+    )
+    before_revision = repository.current_state_revision("user-1")
+
+    with pytest.raises(StorageConflict):
+        repository.apply_record_bundle(
+            "user-1",
+            {"accounts": [{"account_id": "account-1", "balance": 100}]},
+            classification_completion={
+                "classification_id": run["classification_id"],
+                "import_id": "import-user-2",
+                "label_set_hash": "labels-hash",
+                "status": "SUCCEEDED",
+                "applied": True,
+                "attempt_count": 1,
+                "fallback_used": False,
+                "latency_ms": 5,
+                "group_count": 1,
+                "merged_label_count": 1,
+                "response_payload": {"groups": [], "ungrouped": ["L1", "L2"]},
+                "error_code": None,
+            },
+        )
+
+    assert repository.current_state_revision("user-1") == before_revision
+    assert repository.list_records("user-1", "accounts") == []
+    assert repository.get_classification_run(run["classification_id"])["status"] == ("IN_PROGRESS")
+
+
+def test_stale_ai_candidate_decision_cannot_overwrite_a_user_split(
+    repository: FlowGuardRepository,
+) -> None:
+    source = {
+        "candidate_id": "candidate-ai",
+        "candidate_type": "FIXED_EXPENSE",
+        "status": "PENDING",
+        "classification_group": {
+            "source": "AI",
+            "labels": ["상호A", "상호 A"],
+            "can_split": True,
+        },
+    }
+    repository.upsert_records("user-1", "candidates", [source])
+    repository.split_candidate_group(
+        "user-1",
+        "candidate-ai",
+        alternatives=[],
+        notices=[],
+    )
+
+    with pytest.raises(StorageConflict):
+        repository.apply_record_bundle(
+            "user-1",
+            {
+                "candidates": [{**source, "status": "CONFIRMED"}],
+                "scheduled_events": [
+                    {
+                        "event_id": "event-stale",
+                        "amount": 100,
+                    }
+                ],
+            },
+            candidate_preconditions={"candidate-ai": source},
+        )
+
+    assert repository.list_records("user-1", "scheduled_events") == []
+    stored = repository.get_record("user-1", "candidates", "candidate-ai")
+    assert stored["classification_group"]["user_split"] is True
+
+
+def test_reset_user_data_deletes_only_that_users_classification_audit(
+    repository: FlowGuardRepository,
+) -> None:
+    common = {
+        "request_id": "ai-classify-1",
+        "label_set_hash": "labels-hash",
+        "schema_version": "1.2",
+        "contract_version": "1.2",
+        "prompt_version": "classify-1",
+        "mode": "ON",
+        "label_count": 2,
+    }
+    first, _ = repository.create_or_get_classification_run(
+        **common,
+        user_id="user-1",
+        import_id="import-1",
+        idempotency_key="classification-user-1",
+    )
+    second, _ = repository.create_or_get_classification_run(
+        **common,
+        user_id="user-2",
+        import_id="import-2",
+        idempotency_key="classification-user-2",
+    )
+
+    repository.reset_user_data("user-1")
+
+    with pytest.raises(RecordNotFound):
+        repository.get_classification_run(first["classification_id"])
+    assert repository.get_classification_run(second["classification_id"])["user_id"] == "user-2"
 
 
 def test_stale_report_cannot_replace_latest_pointer(repository: FlowGuardRepository) -> None:
