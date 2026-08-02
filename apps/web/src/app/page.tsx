@@ -63,7 +63,7 @@ const interpretationStatusLabels: Record<InterpretationStatus, string> = {
 
 const executionStageLabels: Record<AnalysisExecutionStage, string> = {
   QUEUED: "작업 대기",
-  SNAPSHOT_BUILDING: "금융 스냅숏 생성",
+  SNAPSHOT_BUILDING: "금융 상태 고정",
   BASELINE_ANALYZING: "기준 현금흐름 계산",
   AGENT_INVESTIGATING: "위험 근거 조사",
   PLAN_EVALUATING: "대응안 검증",
@@ -83,7 +83,7 @@ function interpretationSummary(
     return "별도 AI 해석 서비스가 검증된 금융 결과를 사용자용 설명으로 정리했습니다.";
   }
   if (status === "FALLBACK") {
-    return "AI 해석 대신 백엔드의 규칙 기반 설명을 사용했습니다. 금융 계산과 추천 검증 결과는 그대로 유지됩니다.";
+    return "AI 설명 대신 정해진 규칙으로 안내했습니다. 금액과 위험 판정, 추천 검증 결과는 그대로입니다.";
   }
   if (status === "FAILED") {
     return "AI 해석을 완료하지 못했지만 금융 계산과 검증된 추천 결과는 유지됩니다.";
@@ -92,7 +92,7 @@ function interpretationSummary(
     return "이 설명은 이전 금융 데이터 기준이므로 최신 리포트로 승격되지 않았습니다.";
   }
   if (status === "NOT_REQUESTED") {
-    return "현재 결과는 별도 AI 설명 없이 결정론적 금융 분석만으로 제공됩니다.";
+    return "AI 설명 없이 계산 결과만으로 정리했습니다. 금액과 위험 판정은 동일합니다.";
   }
   if (status === "QUEUED" || status === "RUNNING") {
     return "금융 분석 결과는 준비되었으며 별도 AI 설명을 생성하고 있습니다.";
@@ -108,6 +108,25 @@ function traceKindLabel(kind: string) {
       CANDIDATE_EVALUATION: "대응안 검증",
       FINAL_SELECTION: "최종 선택",
     }[kind] || "판단 단계"
+  );
+}
+
+/** 감사 추적 제목에 그대로 실려 오는 행동 유형 코드를 사용자 언어로 바꾼다. */
+const traceActionLabels: Record<string, string> = {
+  TRANSFER: "계좌 이동",
+  RESERVE_FUNDS: "목적별 자금 확보",
+  ADJUST_DISCRETIONARY_BUDGET: "선택지출 조정",
+  PAUSE_SAVINGS: "저축 일시 조정",
+  SHIFT_PAYMENT_DATE: "결제일 변경",
+  DELAY_PURCHASE: "구매 시점 조정",
+  ADD_INSTALLMENT: "신규 할부",
+  CONFIRM_RECEIVABLE: "거래처 지급 확인",
+};
+
+function traceTitle(title: string) {
+  return Object.entries(traceActionLabels).reduce(
+    (text, [code, label]) => text.replace(code, label),
+    title,
   );
 }
 
@@ -317,16 +336,17 @@ export default function DashboardPage() {
       <section className="agent-trace" aria-labelledby="agent-trace-title">
         <div className="agent-trace-header">
           <div>
-            <p className="card-kicker">검증 가능한 백엔드 판단</p>
+            <p className="card-kicker">확인 가능한 판단 과정</p>
             <h2 id="agent-trace-title">위험에서 추천까지 확인한 과정</h2>
             <p>
-              금액·날짜·위험과 대응안은 결정론적 금융 코어와 백엔드 추천
-              빌더가 계산하고 검증합니다. 별도 AI 서비스는 검증된 결과의
-              설명만 담당합니다.
+              금액과 날짜, 위험 판정은 정해진 계산 규칙으로 구합니다. AI가
+              숫자를 만들어내지 않으므로, 같은 정보를 넣으면 언제나 같은
+              결과가 나옵니다. AI는 그 결과를 읽기 쉽게 설명하는 역할만
+              합니다.
             </p>
           </div>
           <div className="agent-mode">
-            <span>결정론적 금융 분석</span>
+            <span>같은 정보 · 같은 결과</span>
             <small>{analysisStatusText}</small>
           </div>
         </div>
@@ -369,11 +389,8 @@ export default function DashboardPage() {
                             : "완료"}
                     </small>
                   </div>
-                  <h3>{step.title}</h3>
+                  <h3>{traceTitle(step.title)}</h3>
                   <p>{step.summary}</p>
-                  {(step.tool_name || step.candidate_id) && (
-                    <code>{step.tool_name || step.candidate_id}</code>
-                  )}
                 </div>
               </li>
             ))}

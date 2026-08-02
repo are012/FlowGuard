@@ -18,14 +18,14 @@ interface AnalysisStage {
 const ANALYSIS_STAGES: AnalysisStage[] = [
   {
     key: "SNAPSHOT_BUILDING",
-    label: "금융 스냅숏 생성",
+    label: "금융 상태 고정",
     description: "계좌·카드·할부·예정수입을 분석 시점 기준으로 고정합니다.",
     seconds: 2,
   },
   {
     key: "BASELINE_ANALYZING",
     label: "13주 현금흐름 계산",
-    description: "날짜별 잔액과 Safe-to-Spend를 결정론적으로 계산합니다.",
+    description: "날짜별 잔액과 오늘 쓸 수 있는 돈을 정해진 규칙으로 계산합니다.",
     seconds: 4,
   },
   {
@@ -144,7 +144,7 @@ export function AnalysisProgress() {
         <div className="analysis-progress-slow">
           <Icon name="info" size={17} />
           <span>
-            AI 해석이 예상보다 오래 걸리고 있어요. 응답이 없으면 결정론적 분석
+            AI 설명이 예상보다 오래 걸리고 있어요. 응답이 없으면 규칙 기반
             결과로 안전하게 대체하며, 금융 계산 결과는 그대로 유지됩니다.
           </span>
         </div>
