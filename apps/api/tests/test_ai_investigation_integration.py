@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -255,6 +255,37 @@ def _financial_signature(report: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _numeric_date_signature(
+    value: Any,
+    path: tuple[str, ...] = (),
+) -> tuple[tuple[tuple[str, ...], int | float | str], ...]:
+    if isinstance(value, Mapping):
+        return tuple(
+            item
+            for key in sorted(value, key=str)
+            for item in _numeric_date_signature(value[key], (*path, str(key)))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            item
+            for index, child in enumerate(value)
+            for item in _numeric_date_signature(child, (*path, str(index)))
+        )
+    if isinstance(value, bool):
+        return ()
+    if isinstance(value, (int, float)):
+        return ((path, value),)
+    if isinstance(value, (date, datetime)):
+        return ((path, value.isoformat()),)
+    if isinstance(value, str) and len(value) >= 10 and value[4] == "-" and value[7] == "-":
+        try:
+            date.fromisoformat(value[:10])
+        except ValueError:
+            return ()
+        return ((path, value),)
+    return ()
+
+
 def test_unset_mode_preserves_the_deterministic_analysis_and_interpret_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -498,6 +529,16 @@ def test_complete_replay_reuses_the_stored_model_and_financial_result() -> None:
     assert [_candidate_signature(candidate) for candidate in replayed["actionCandidates"]] == [
         _candidate_signature(candidate) for candidate in report["agent"]["actionCandidates"]
     ]
+    original_financial_values = {
+        field: _numeric_date_signature(report["agent"][field], (field,))
+        for field in ("risk", "actionCandidates", "recommended_plan")
+    }
+    replayed_financial_values = {
+        field: _numeric_date_signature(replayed[field], (field,))
+        for field in ("risk", "actionCandidates", "recommended_plan")
+    }
+    assert all(original_financial_values.values())
+    assert replayed_financial_values == original_financial_values
 
 
 def test_incomplete_succeeded_replay_audit_fails_closed_without_recalling_ai(
