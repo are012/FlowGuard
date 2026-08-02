@@ -26,6 +26,8 @@ import {
   statusLabel,
 } from "@/lib/format";
 import type {
+  AgentDecisionMode,
+  AgentTraceStep,
   AnalysisExecutionStage,
   AnalysisStatus,
   DashboardResponse,
@@ -130,6 +132,44 @@ function traceTitle(title: string) {
   );
 }
 
+function isAITraceSource(source?: AgentTraceStep["source"]) {
+  return source === "AI";
+}
+
+function traceModeCopy(mode?: AgentDecisionMode) {
+  if (mode === "AI_INVESTIGATED") {
+    return {
+      kicker: "AI와 규칙이 확인한 과정",
+      title: "AI 조사에서 추천까지 확인한 과정",
+      description:
+        "AI가 확인할 금융 조회를 고르고 조사 가설을 정리했으며 백엔드가 도구를 실행했습니다. 금액과 날짜, 위험 판정과 최종 수치는 정해진 계산 규칙으로 구합니다.",
+      badge: "AI 조사 · 규칙 계산",
+      interpretationNote:
+        "아래 AI 조사 단계는 조회 선택과 조사 가설 정리를 맡았고, 금액과 날짜, 위험 판정 및 최종 결과는 규칙이 계산했습니다.",
+    };
+  }
+  if (mode === "AI_PARTIAL") {
+    return {
+      kicker: "AI 조사 기록과 규칙 계산",
+      title: "일부 AI 조회에서 추천까지 확인한 과정",
+      description:
+        "AI 조사가 중단되어 수집한 관찰은 감사 기록으로만 남았습니다. 최종 판단은 규칙 기반 경로로 다시 수행했고, 금액과 날짜, 위험 판정도 규칙이 계산했습니다.",
+      badge: "AI 조사 일부 · 최종 판단 미적용",
+      interpretationNote:
+        "아래 AI 조사 기록은 감사용으로만 남겼고 최종 판단에는 적용하지 않았습니다. 최종 결과는 규칙이 계산했습니다.",
+    };
+  }
+  return {
+    kicker: "규칙이 계산한 과정",
+    title: "위험에서 추천까지 확인한 과정",
+    description:
+      "금액과 날짜, 위험 판정은 정해진 계산 규칙으로 구합니다. AI가 숫자를 만들어내지 않으므로, 같은 정보를 넣으면 언제나 같은 결과가 나옵니다. AI는 그 결과를 읽기 쉽게 설명하는 역할만 합니다.",
+    badge: "같은 정보 · 같은 결과",
+    interpretationNote:
+      "아래 단계는 규칙이 계산했고, AI는 그 결과를 이 문장으로 옮겨 적기만 합니다.",
+  };
+}
+
 export default function DashboardPage() {
   const { data, error, loading, reload } =
     useRemote<DashboardResponse>("/api/v1/dashboard");
@@ -184,6 +224,10 @@ export default function DashboardPage() {
   const staleCount = data.data_quality?.stale_sources?.length || 0;
   const unconfirmedCount = data.data_quality?.unconfirmed_items?.length || 0;
   const decisionTrace = data.decision_trace || undefined;
+  const traceCopy = traceModeCopy(decisionTrace?.mode);
+  const hasAIInvestigation =
+    decisionTrace?.mode === "AI_INVESTIGATED" ||
+    decisionTrace?.mode === "AI_PARTIAL";
   const refreshStatus = data.refresh_status || data.analysis_status;
   const reportIsStale = data.is_stale ?? data.analysis_required ?? false;
   const reportRevision = data.report_revision || data.analysis_revision;
@@ -336,17 +380,12 @@ export default function DashboardPage() {
       <section className="agent-trace" aria-labelledby="agent-trace-title">
         <div className="agent-trace-header">
           <div>
-            <p className="card-kicker">규칙이 계산한 과정</p>
-            <h2 id="agent-trace-title">위험에서 추천까지 확인한 과정</h2>
-            <p>
-              금액과 날짜, 위험 판정은 정해진 계산 규칙으로 구합니다. AI가
-              숫자를 만들어내지 않으므로, 같은 정보를 넣으면 언제나 같은
-              결과가 나옵니다. AI는 그 결과를 읽기 쉽게 설명하는 역할만
-              합니다.
-            </p>
+            <p className="card-kicker">{traceCopy.kicker}</p>
+            <h2 id="agent-trace-title">{traceCopy.title}</h2>
+            <p>{traceCopy.description}</p>
           </div>
           <div className="agent-mode">
-            <span>같은 정보 · 같은 결과</span>
+            <span>{traceCopy.badge}</span>
             <small>{analysisStatusText}</small>
           </div>
         </div>
@@ -366,10 +405,7 @@ export default function DashboardPage() {
               data.interpretation_status,
               data.interpretation,
             )}
-            <small>
-              아래 단계는 규칙이 계산했고, AI는 그 결과를 이 문장으로
-              옮겨 적기만 합니다.
-            </small>
+            <small>{traceCopy.interpretationNote}</small>
           </span>
         </div>
 
@@ -383,22 +419,56 @@ export default function DashboardPage() {
                 <div>
                   <div className="trace-meta">
                     <span>{traceKindLabel(step.kind)}</span>
-                    <small className={`trace-status status-${step.status.toLowerCase()}`}>
-                      {step.status === "REJECTED"
-                        ? "탈락"
-                        : step.status === "NEEDS_REVIEW"
-                          ? "검토 필요"
-                          : step.status === "FAILED"
-                            ? "확인 실패"
-                            : "완료"}
-                    </small>
+                    <span className="trace-meta-badges">
+                      {isAITraceSource(step.source) && (
+                        <span
+                          className={`trace-source${
+                            step.status === "AUDIT_ONLY" ? " trace-source-audit" : ""
+                          }`}
+                        >
+                          {step.status === "AUDIT_ONLY"
+                            ? "AI 조사 · 감사 전용"
+                            : `AI 조사${step.phase ? ` · ${step.phase}차` : ""}`}
+                        </span>
+                      )}
+                      <small className={`trace-status status-${step.status.toLowerCase()}`}>
+                        {step.status === "REJECTED"
+                          ? "탈락"
+                          : step.status === "AUDIT_ONLY"
+                            ? "감사 기록"
+                            : step.status === "NEEDS_REVIEW"
+                              ? "검토 필요"
+                              : step.status === "FAILED"
+                                ? "확인 실패"
+                                : "완료"}
+                      </small>
+                    </span>
                   </div>
                   <h3>{traceTitle(step.title)}</h3>
                   <p>{step.summary}</p>
+                  {step.kind === "TOOL_CALL" &&
+                    isAITraceSource(step.source) &&
+                    step.reason && (
+                      <details className="trace-reason">
+                        <summary>AI가 이 조회를 고른 이유</summary>
+                        <p>{step.reason}</p>
+                      </details>
+                    )}
                 </div>
               </li>
             ))}
           </ol>
+        ) : null}
+
+        {hasAIInvestigation && decisionTrace?.unresolved_questions?.length ? (
+          <div className="agent-unresolved">
+            <strong>확인하지 못한 것</strong>
+            <ul>
+              {decisionTrace.unresolved_questions.map((question, index) => (
+                <li key={`${index}-${question}`}>{question}</li>
+              ))}
+            </ul>
+          </div>
         ) : null}
 
         {decisionTrace?.disclosure && (

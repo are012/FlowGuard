@@ -100,6 +100,9 @@ test("sample data completes the safe virtual recommendation demo", async ({
   await expect(
     page.locator(".agent-interpretation small"),
   ).toContainText("AI는 그 결과를 이 문장으로 옮겨 적기만 합니다");
+  await expect(page.locator(".agent-trace-list > li")).toHaveCount(11);
+  await expect(page.locator(".trace-source")).toHaveCount(0);
+  await expect(page.locator(".trace-reason")).toHaveCount(0);
 
   const dashboardResponse = await request.get(`${API_URL}/api/v1/dashboard`);
   expect(dashboardResponse.ok()).toBe(true);
