@@ -205,8 +205,7 @@ def test_bounds_are_fixed_for_the_synchronous_two_phase_loop() -> None:
     assert loop_module.PHASE_TIMEOUT == 5.0
     # 총예산은 고정값이 아니라 단계 제한시간의 합 + 도구 실행 여유로 정의된다.
     assert loop_module.TOTAL_BUDGET == (
-        loop_module.PHASE_TIMEOUT * loop_module.MAX_PHASES
-        + loop_module.TOOL_EXECUTION_ALLOWANCE
+        loop_module.PHASE_TIMEOUT * loop_module.MAX_PHASES + loop_module.TOOL_EXECUTION_ALLOWANCE
     )
 
 
@@ -803,10 +802,7 @@ def test_total_budget_covers_every_phase_timeout() -> None:
     끝나 2단계 설계가 구조적으로 완주할 수 없었다.
     """
 
-    assert (
-        loop_module.TOTAL_BUDGET
-        >= loop_module.PHASE_TIMEOUT * loop_module.MAX_PHASES
-    )
+    assert loop_module.TOTAL_BUDGET >= loop_module.PHASE_TIMEOUT * loop_module.MAX_PHASES
 
 
 def test_total_budget_leaves_room_for_tool_execution() -> None:
